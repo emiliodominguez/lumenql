@@ -1,3 +1,4 @@
+import type { Plugin } from "./types";
 import { isObject } from "./utils";
 
 /**
@@ -101,4 +102,18 @@ export function createUploadBody(payload: { variables?: unknown }): FormData | u
 	}
 
 	return form;
+}
+
+/**
+ * File uploads ([GraphQL multipart request spec](https://github.com/jaydenseric/graphql-multipart-request-spec)):
+ * operations whose variables carry `File` / `Blob` values are sent as `multipart/form-data`, and are never cached
+ * nor deduplicated (files have no stable identity). Built into the `lumenql` entry.
+ *
+ * @example
+ * const client = new Client({ url, plugins: [upload()] }); // from "lumenql/core"
+ *
+ * @returns The plugin
+ */
+export function upload(): Plugin {
+	return { name: "upload", encode: createUploadBody, bypass: containsFiles };
 }

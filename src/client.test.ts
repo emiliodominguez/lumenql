@@ -563,8 +563,9 @@ describe("Client", function () {
 				return String(call[0]);
 			});
 
-			expect(lines[0]).toBe("[lumenql] query GetUser → deduplicated");
-			expect(lines[1]).toMatch(/^\[lumenql\] query GetUser → ok in \d+ms$/);
+			// The deduplicated call is logged when its (shared) result arrives.
+			expect(lines[0]).toMatch(/^\[lumenql\] query GetUser → ok in \d+ms$/);
+			expect(lines[1]).toBe("[lumenql] query GetUser → deduplicated");
 			expect(lines[2]).toBe("[lumenql] query GetUser → cache hit");
 			expect(lines[3]).toMatch(/^\[lumenql\] query \(anonymous\) → ok/);
 		});

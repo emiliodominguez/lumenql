@@ -1,5 +1,6 @@
 import { readDelimited } from "./sse";
-import type { GraphQLFormattedError } from "./types";
+import type { GraphQLFormattedError, OperationContext, Plugin, StreamState } from "./types";
+import { normalizeErrors } from "./errors";
 import { isObject } from "./utils";
 
 /**
@@ -34,16 +35,7 @@ export interface IncrementalPayload {
 /**
  * Accumulated result while incremental payloads arrive.
  */
-export interface IncrementalState {
-	/** The merged data so far (replaced immutably on every payload) */
-	data: unknown;
-	/** Every error received so far */
-	errors: GraphQLFormattedError[];
-	/** Whether more payloads are expected */
-	hasNext: boolean;
-	/** Pending deferred/streamed fragments, by id */
-	pending: Map<string, Path>;
-}
+export type IncrementalState = StreamState;
 
 /**
  * Detects documents that may be delivered incrementally.
@@ -156,31 +148,6 @@ function entries<T extends object>(value: ReadonlyArray<T> | null | undefined): 
  */
 function malformed(): TypeError {
 	return new TypeError("Malformed incremental payload.");
-}
-
-/**
- * Normalizes the `errors` of a response, which a buggy or hostile server may send as a single object, a string or
- * a list with non-object entries.
- *
- * @param errors - The raw `errors` value
- * @returns Well-formed errors (empty when there are none)
- */
-export function normalizeErrors(errors: unknown): GraphQLFormattedError[] {
-	if (errors === undefined || errors === null) return [];
-
-	return (Array.isArray(errors) ? errors : [errors]).map(toFormattedError);
-}
-
-/**
- * Normalizes one GraphQL error.
- *
- * @param error - The raw error
- * @returns The error, or a placeholder carrying its text
- */
-function toFormattedError(error: unknown): GraphQLFormattedError {
-	if (isObject(error) && typeof error.message === "string") return error as unknown as GraphQLFormattedError;
-
-	return { message: typeof error === "string" ? error : "Unknown error" };
 }
 
 /**
@@ -338,4 +305,36 @@ function getPartBody(part: string): string {
 	const body = separator === -1 ? part : part.slice(separator + 2);
 
 	return body.trim().startsWith("{") ? body.trim() : "";
+}
+
+/**
+ * Incremental delivery (`@defer` / `@stream`): documents using the directives advertise `multipart/mixed`, and
+ * payloads are merged into one result (`gql()` resolves with the complete result, `subscribe()` yields each step).
+ * Built into the `lumenql` entry.
+ *
+ * @returns The plugin
+ */
+export function incremental(): Plugin {
+	return {
+		name: "incremental",
+		headers(headers: Headers, context: OperationContext): void {
+			if (!INCREMENTAL_DIRECTIVE.test(context.query)) return;
+
+			const accept = headers.get("Accept");
+
+			headers.set("Accept", context.stream ? `${accept}, ${MULTIPART_ACCEPT}` : `${MULTIPART_ACCEPT}, ${accept}`);
+		},
+		decode(response: Response, signal: AbortSignal): AsyncIterable<string> | undefined {
+			const contentType = response.headers.get("Content-Type") ?? "";
+
+			// Media types are case-insensitive (the boundary value is not).
+			return contentType.toLowerCase().includes("multipart/mixed")
+				? readMultipartMixed(response.body!, getBoundary(contentType), signal)
+				: undefined;
+		},
+		merge(state: StreamState, payload: unknown): boolean {
+			applyIncremental(state, payload as IncrementalPayload);
+			return true;
+		},
+	};
 }

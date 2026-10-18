@@ -3,15 +3,22 @@ export { MemoryCache, type MemoryCacheConfiguration } from "./cache/memory-cache
 export { StorageCache, type StorageCacheConfiguration, type StorageLike } from "./cache/storage-cache";
 export { dedupeFragments, graphql, minify, type DocumentString } from "./document";
 export { ClientError, isClientError, type ClientErrorDetails } from "./errors";
+export { logger } from "./logger";
 export { optimistic } from "./optimistic";
 export { QueryRef, type QueryListener } from "./query-ref";
+export { incremental } from "./incremental";
+export { persistedQueries } from "./persisted";
 export { isRetryable } from "./retry";
+export { sse } from "./sse";
+export { upload } from "./upload";
 export type {
 	AuthTokenResolver,
 	Cache,
 	CacheKey,
 	CacheTarget,
 	ClientConfiguration,
+	ClientEventListener,
+	ClientEvents,
 	FetchMoreOptions,
 	FetchPolicy,
 	GraphQLFormattedError,
@@ -23,13 +30,16 @@ export type {
 	Middleware,
 	MiddlewareNext,
 	OperationContext,
+	OperationPayload,
 	OperationType,
 	OptimisticUpdate,
 	PersistedQueriesOptions,
+	Plugin,
 	QueryState,
 	RequestOptions,
 	RequiredKeys,
 	RetryOptions,
+	StreamState,
 	SubscribeOptions,
 	SubscriptionRequest,
 	SubscriptionTransport,

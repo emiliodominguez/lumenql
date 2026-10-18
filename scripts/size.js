@@ -3,37 +3,56 @@ import { brotliCompressSync, gzipSync } from "node:zlib";
 import { buildSync, transformSync } from "esbuild";
 
 /**
- * Maximum min+gzip size of a typical app import (`Client` + `MemoryCache`, tree-shaken), in bytes. CI fails above it.
+ * Maximum min+gzip size of a typical app import from the batteries-included entry (`Client` + `MemoryCache`,
+ * tree-shaken), in bytes. CI fails above it.
  */
-const BUDGET = 10.75 * 1024;
+const BUDGET = 11.75 * 1024;
 
 /**
- * What a typical app imports.
+ * Tree-shaken imports measured against a budget (min+gzip bytes), in addition to the full bundles.
  */
-const TYPICAL_IMPORT = 'import { Client, MemoryCache } from "./dist/index.js"; console.log(Client, MemoryCache);';
+const IMPORTS = [
+	{ label: "Client + MemoryCache", code: 'import { Client, MemoryCache } from "./dist/index.js";', budget: BUDGET },
+	{ label: "core: Client + MemoryCache", code: 'import { Client, MemoryCache } from "./dist/core.js";', budget: 9.25 * 1024 },
+	{ label: "plugin: upload", code: 'import { upload } from "./dist/upload.js";', budget: 1.75 * 1024 },
+	{
+		label: "plugin: persistedQueries",
+		code: 'import { persistedQueries } from "./dist/persisted.js";',
+		budget: 1.75 * 1024,
+	},
+	{ label: "plugin: incremental", code: 'import { incremental } from "./dist/incremental.js";', budget: 1.75 * 1024 },
+	{ label: "plugin: sse", code: 'import { sse } from "./dist/sse.js";', budget: 1.75 * 1024 },
+];
 
 /**
- * Prints minified, gzip and brotli sizes for the full bundles and for a tree-shaken typical import,
- * and fails when the typical import exceeds the budget.
+ * Prints minified, gzip and brotli sizes for the full bundles and for tree-shaken imports, and fails when an import
+ * exceeds its budget.
  */
 function main() {
-	for (const file of ["dist/index.js", "dist/index.cjs", "dist/react.js", "dist/ws.js"]) {
+	for (const file of ["dist/react.js", "dist/ws.js"]) {
 		report(file, transformSync(readFileSync(file, "utf8"), { minify: true, loader: "js" }).code);
 	}
 
-	const { outputFiles } = buildSync({
-		stdin: { contents: TYPICAL_IMPORT, resolveDir: process.cwd(), loader: "js" },
-		bundle: true,
-		minify: true,
-		format: "esm",
-		write: false,
-		external: ["react"],
-	});
-	const gzip = report("Client + MemoryCache", outputFiles[0].text);
+	for (const { label, code, budget } of IMPORTS) {
+		const { outputFiles } = buildSync({
+			stdin: {
+				contents: `${code} console.log(${code.match(/\{ (.+) \}/)[1]});`,
+				resolveDir: process.cwd(),
+				loader: "js",
+			},
+			bundle: true,
+			minify: true,
+			format: "esm",
+			write: false,
+			external: ["react"],
+			logLevel: "error",
+		});
+		const gzip = report(label, outputFiles[0].text);
 
-	if (gzip > BUDGET) {
-		console.error(`\nSize budget exceeded: ${format(gzip)} > ${format(BUDGET)} (min+gzip)`);
-		process.exitCode = 1;
+		if (gzip > budget) {
+			console.error(`\nSize budget exceeded for ${label}: ${format(gzip)} > ${format(budget)} (min+gzip)`);
+			process.exitCode = 1;
+		}
 	}
 }
 

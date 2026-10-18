@@ -1,4 +1,5 @@
 import { rethrowNetworkFailure } from "./retry";
+import type { OperationContext, Plugin } from "./types";
 import { ignoreError, onAbort } from "./utils";
 
 /**
@@ -148,5 +149,41 @@ function getReader(
 			await iterator.return?.();
 		},
 		releaseLock: function releaseLock(): void {},
+	};
+}
+
+/**
+ * Yields the data of SSE `next`/`message` events until `complete`.
+ *
+ * @param body - The response body
+ * @param signal - The abort signal
+ * @yields Each event payload
+ */
+async function* readServerSentEventData(body: ReadableStream<Uint8Array>, signal: AbortSignal): AsyncGenerator<string> {
+	for await (const event of readServerSentEvents(body, signal)) {
+		if (event.event === "complete") return;
+		if ((event.event === "next" || event.event === "message") && event.data) yield event.data;
+	}
+}
+
+/**
+ * Streams over Server-Sent Events ([GraphQL over SSE](https://github.com/enisdenjo/graphql-sse), "distinct
+ * connections" mode): `subscribe()` asks for `text/event-stream` and reads each event as a result. Built into the
+ * `lumenql` entry. Not needed when every subscription goes through a `subscriptionTransport` (e.g. WebSocket).
+ *
+ * @returns The plugin
+ */
+export function sse(): Plugin {
+	return {
+		name: "sse",
+		headers(headers: Headers, context: OperationContext): void {
+			if (context.stream) headers.set("Accept", "text/event-stream");
+		},
+		decode(response: Response, signal: AbortSignal): AsyncIterable<string> | undefined {
+			// Media types are case-insensitive.
+			const mediaType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
+
+			return mediaType.includes("text/event-stream") ? readServerSentEventData(response.body!, signal) : undefined;
+		},
 	};
 }

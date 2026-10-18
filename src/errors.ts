@@ -1,4 +1,5 @@
 import type { GraphQLFormattedError } from "./types";
+import { isObject } from "./utils";
 
 /**
  * Details attached to a {@link ClientError}.
@@ -59,4 +60,29 @@ export function isClientError(error: unknown): error is ClientError {
 		error instanceof ClientError ||
 		(error instanceof Error && error.name === "ClientError" && Array.isArray((error as ClientError).errors))
 	);
+}
+
+/**
+ * Normalizes the `errors` of a response, which a buggy or hostile server may send as a single object, a string or
+ * a list with non-object entries.
+ *
+ * @param errors - The raw `errors` value
+ * @returns Well-formed errors (empty when there are none)
+ */
+export function normalizeErrors(errors: unknown): GraphQLFormattedError[] {
+	if (errors === undefined || errors === null) return [];
+
+	return (Array.isArray(errors) ? errors : [errors]).map(toFormattedError);
+}
+
+/**
+ * Normalizes one GraphQL error.
+ *
+ * @param error - The raw error
+ * @returns The error, or a placeholder carrying its text
+ */
+function toFormattedError(error: unknown): GraphQLFormattedError {
+	if (isObject(error) && typeof error.message === "string") return error as unknown as GraphQLFormattedError;
+
+	return { message: typeof error === "string" ? error : "Unknown error" };
 }

@@ -150,7 +150,7 @@ export interface ClientConfiguration {
 	timeout?: number | undefined;
 	/** Share a single network request between identical in-flight queries. Defaults to `true`. */
 	dedupe?: boolean | undefined;
-	/** Logs operations, cache hits and timings through `console.debug`. */
+	/** Logs operations, cache hits and timings through `console.debug` (the `logger()` plugin; `lumenql` entry only). */
 	debug?: boolean | undefined;
 	/** Retry policy for failed requests. Disabled by default. A number sets the attempts with default backoff. */
 	retry?: number | RetryOptions | undefined;
@@ -170,7 +170,141 @@ export interface ClientConfiguration {
 	 * Defaults to GraphQL over SSE through `fetch`.
 	 */
 	subscriptionTransport?: SubscriptionTransport | undefined;
+	/**
+	 * Extensions, run in order. Built-in features of the `lumenql` entry (uploads, persisted queries, incremental
+	 * delivery, SSE) are plugins too; `lumenql/core` ships none of them.
+	 */
+	plugins?: ReadonlyArray<Plugin> | undefined;
 }
+
+/**
+ * The payload sent to the server: a JSON body, GET search params or a subscription request.
+ */
+export interface OperationPayload {
+	/** The GraphQL document. Absent when only a persisted-query hash is sent. */
+	query?: string | undefined;
+	/** Operation variables */
+	variables?: unknown;
+	/** The selected operation name */
+	operationName?: string | undefined;
+	/** Protocol extensions (e.g. `persistedQuery`) */
+	extensions?: Record<string, unknown> | undefined;
+}
+
+/**
+ * The result of a streamed or incrementally delivered operation, accumulated payload after payload.
+ */
+export interface StreamState {
+	/** The merged data so far */
+	data: unknown;
+	/** Every error received so far */
+	errors: GraphQLFormattedError[];
+	/** Whether more payloads are expected */
+	hasNext: boolean;
+	/** Pending deferred/streamed fragments, by id (incremental delivery) */
+	pending: Map<string, ReadonlyArray<string | number>>;
+}
+
+/**
+ * Extends a client. Every hook is optional; hooks run in plugin order. Plugins act on payloads, headers, bodies and
+ * responses; they observe everything else (cache, retries, live queries) through {@link ClientEvents}.
+ */
+export interface Plugin {
+	/** Unique name: a second plugin with the same name is ignored (the first one wins). */
+	readonly name: string;
+	/**
+	 * Runs once per client, when the client is created.
+	 *
+	 * @param client - The client
+	 * @returns Optional teardown, run by `client.dispose()`
+	 */
+	setup?(client: import("./core").Client): void | (() => void);
+	/**
+	 * Wraps sending a payload, like middleware one level above HTTP (e.g. persisted queries: hash first, fall back
+	 * to the document). The first plugin is the outermost. For streams (`context.stream`), `next` resolves with the
+	 * payload the stream is opened with.
+	 *
+	 * @param payload - The payload
+	 * @param context - The operation metadata
+	 * @param next - Sends the (possibly replaced) payload through the next plugins
+	 * @returns The result of `next`
+	 */
+	send?<T>(
+		payload: OperationPayload,
+		context: OperationContext,
+		next: (payload: OperationPayload) => Promise<T>,
+	): Promise<T>;
+	/**
+	 * Adjusts the default request headers (e.g. `Accept`), before the client and per-call headers apply.
+	 *
+	 * @param headers - The headers, mutable
+	 * @param context - The operation metadata
+	 */
+	headers?(headers: Headers, context: OperationContext): void;
+	/**
+	 * Encodes a payload as a POST body (e.g. multipart uploads). `undefined` leaves it to the next plugin, then JSON.
+	 *
+	 * @param payload - The payload
+	 * @returns The body, if this plugin handles the payload
+	 */
+	encode?(payload: OperationPayload): BodyInit | undefined;
+	/**
+	 * Whether variables must bypass the cache and deduplication (e.g. files, which have no stable identity).
+	 *
+	 * @param variables - The operation variables
+	 * @returns `true` to bypass
+	 */
+	bypass?(variables: unknown): boolean;
+	/**
+	 * Decodes a streamed response into raw JSON payloads (e.g. SSE, `multipart/mixed`).
+	 *
+	 * @param response - A successful response with a body
+	 * @param signal - Cancels the reading
+	 * @returns The payloads, or `undefined` when this plugin does not handle the response
+	 */
+	decode?(response: Response, signal: AbortSignal): AsyncIterable<string> | undefined;
+	/**
+	 * Merges a payload into a streamed result (e.g. `@defer` / `@stream`). Without a plugin handling it, a payload's
+	 * `data` replaces the result.
+	 *
+	 * @param state - The result so far, mutable
+	 * @param payload - The parsed payload
+	 * @returns `true` when handled
+	 */
+	merge?(state: StreamState, payload: unknown): boolean;
+}
+
+/**
+ * Events emitted by a client (see `client.on`). Nothing is built or emitted while nobody listens. Listeners run
+ * synchronously, so they can timestamp events themselves.
+ */
+export interface ClientEvents {
+	/** An operation started */
+	operation: { id: number; context: OperationContext; fetchPolicy: FetchPolicy; key: string };
+	/** An operation produced a result (once for `gql`, once per payload for streams) */
+	result: { id: number; context: OperationContext; source: "network" | "cache" | "dedupe" | "stream"; data: unknown };
+	/** An operation failed (after retries) */
+	error: { id: number; context: OperationContext; error: unknown };
+	/** A stream ended without error */
+	done: { id: number; context: OperationContext };
+	/** A failed attempt is retried after `delay` milliseconds */
+	retry: { context: OperationContext; error: unknown; delay: number; attempts: number };
+	/** Real data landed in the cache (response, write, restore, merged page) */
+	cache: { key: string; data: unknown };
+	/** An invalidation finished */
+	invalidate: { prefix: CacheKey; removed: number };
+	/** Optimistic layers were applied to an entry, or settled */
+	optimistic: { key: string; phase: "apply" | "commit" | "rollback" };
+	/** A live query started or stopped watching an entry; `watchers` is the count left */
+	watch: { key: string; watchers: number };
+}
+
+/**
+ * Listener for a client event.
+ *
+ * @template K - The event type
+ */
+export type ClientEventListener<K extends keyof ClientEvents> = (event: ClientEvents[K]) => void;
 
 /**
  * The operation sent through a {@link SubscriptionTransport}.
@@ -215,6 +349,10 @@ export interface OperationContext {
 	variables?: unknown | undefined;
 	/** Zero-based attempt number (`0` is the first try) */
 	attempt: number;
+	/** Id of the operation, as reported by {@link ClientEvents} */
+	id?: number | undefined;
+	/** Whether the operation streams results (`subscribe()`) rather than resolving once (`gql()`) */
+	stream?: boolean | undefined;
 }
 
 /**

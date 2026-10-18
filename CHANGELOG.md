@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Plugins (`plugins` option): `send` (payload-level middleware), `headers`, `encode`, `bypass`, `decode` and `merge` hooks, plus `setup` / `client.dispose()`. Uploads, persisted queries, SSE, incremental delivery and `debug` logging are now plugins (`upload()`, `persistedQueries()`, `sse()`, `incremental()`, `logger()`); the `lumenql` entry installs them from the same options as before, so nothing changes for existing code.
+- `lumenql/core`: the bare client without built-in plugins (8.9 kB min+gzip for `Client` + `MemoryCache`, against 10.5 kB in 2.0.0), plus `lumenql/upload`, `lumenql/persisted`, `lumenql/incremental` and `lumenql/sse` to add only what an app uses.
+- `client.on(type, listener)`: an event bus for devtools, logging and telemetry (`operation`, `result` with its source, `error`, `done`, `retry`, `cache`, `invalidate`, `optimistic`, `watch`). Nothing is built while nobody listens. `OperationContext` gains `id` and `stream`.
+
+### Changed
+
+- `debug: true` logs a deduplicated call when its shared result arrives (it was logged when it joined the request).
+- The size budget of the `lumenql` entry is 11.75 kB (the plugin seams and the event bus cost about 0.9 kB); `lumenql/core` has its own 9.25 kB budget.
+
 ## 2.0.0 - 2026-10-15
 
 ### Added

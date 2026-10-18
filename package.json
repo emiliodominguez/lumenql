@@ -89,6 +89,56 @@
 				"default": "./dist/ws.cjs"
 			}
 		},
+		"./core": {
+			"import": {
+				"types": "./dist/core.d.ts",
+				"default": "./dist/core.js"
+			},
+			"require": {
+				"types": "./dist/core.d.cts",
+				"default": "./dist/core.cjs"
+			}
+		},
+		"./upload": {
+			"import": {
+				"types": "./dist/upload.d.ts",
+				"default": "./dist/upload.js"
+			},
+			"require": {
+				"types": "./dist/upload.d.cts",
+				"default": "./dist/upload.cjs"
+			}
+		},
+		"./persisted": {
+			"import": {
+				"types": "./dist/persisted.d.ts",
+				"default": "./dist/persisted.js"
+			},
+			"require": {
+				"types": "./dist/persisted.d.cts",
+				"default": "./dist/persisted.cjs"
+			}
+		},
+		"./incremental": {
+			"import": {
+				"types": "./dist/incremental.d.ts",
+				"default": "./dist/incremental.js"
+			},
+			"require": {
+				"types": "./dist/incremental.d.cts",
+				"default": "./dist/incremental.cjs"
+			}
+		},
+		"./sse": {
+			"import": {
+				"types": "./dist/sse.d.ts",
+				"default": "./dist/sse.js"
+			},
+			"require": {
+				"types": "./dist/sse.d.cts",
+				"default": "./dist/sse.cjs"
+			}
+		},
 		"./package.json": "./package.json"
 	},
 	"typesVersions": {
@@ -98,6 +148,21 @@
 			],
 			"ws": [
 				"./dist/ws.d.ts"
+			],
+			"core": [
+				"./dist/core.d.ts"
+			],
+			"upload": [
+				"./dist/upload.d.ts"
+			],
+			"persisted": [
+				"./dist/persisted.d.ts"
+			],
+			"incremental": [
+				"./dist/incremental.d.ts"
+			],
+			"sse": [
+				"./dist/sse.d.ts"
 			]
 		}
 	},

@@ -1,0 +1,1 @@
+export { persistedQueries } from "../persisted";

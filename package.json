@@ -159,6 +159,16 @@
 				"default": "./dist/devtools.cjs"
 			}
 		},
+		"./entities": {
+			"import": {
+				"types": "./dist/entities.d.ts",
+				"default": "./dist/entities.js"
+			},
+			"require": {
+				"types": "./dist/entities.d.cts",
+				"default": "./dist/entities.cjs"
+			}
+		},
 		"./package.json": "./package.json"
 	},
 	"typesVersions": {
@@ -189,6 +199,9 @@
 			],
 			"devtools": [
 				"./dist/devtools.d.ts"
+			],
+			"entities": [
+				"./dist/entities.d.ts"
 			]
 		}
 	},

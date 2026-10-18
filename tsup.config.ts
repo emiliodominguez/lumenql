@@ -9,6 +9,7 @@ export default defineConfig({
 		incremental: "src/entries/incremental.ts",
 		sse: "src/entries/sse.ts",
 		scalars: "src/entries/scalars.ts",
+		entities: "src/entries/entities.ts",
 		devtools: "src/devtools/index.ts",
 		react: "src/react/index.ts",
 		ws: "src/ws/index.ts",

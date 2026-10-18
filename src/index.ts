@@ -2,6 +2,7 @@ export { Client } from "./client";
 export { MemoryCache, type MemoryCacheConfiguration } from "./cache/memory-cache";
 export { StorageCache, type StorageCacheConfiguration, type StorageLike } from "./cache/storage-cache";
 export { dedupeFragments, graphql, minify, type DocumentString } from "./document";
+export { entities, type EntitiesOptions } from "./entities";
 export { ClientError, isClientError, type ClientErrorDetails } from "./errors";
 export { logger } from "./logger";
 export { optimistic } from "./optimistic";

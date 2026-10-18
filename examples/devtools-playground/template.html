@@ -109,12 +109,18 @@
 	.app-head strong {
 		font-weight: 600;
 	}
+	/* Fixed width and eased colors: a background refresh never shifts or flashes the header. */
 	#status {
+		min-width: 11ch;
 		padding: 2px 8px;
 		border: 1px solid var(--line);
 		border-radius: 999px;
 		font: 500 11px var(--mono);
+		text-align: center;
 		color: var(--muted);
+		transition:
+			color 200ms,
+			border-color 200ms;
 	}
 	#status[data-state="loading"] {
 		border-color: var(--accent);

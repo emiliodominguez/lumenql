@@ -133,7 +133,16 @@ const status = document.getElementById("status")!;
 const ref = client.watch<Todos>({ key: ["todos"], query: TODOS });
 
 ref.subscribe(function render({ data, loading, error }) {
-	status.textContent = error ? `Error: ${(error as Error).message}` : loading ? "Loading…" : "Up to date";
+	// Data on screen while refetching is a sync, not a load: the list stays, only the pill says so.
+	const focused = document.activeElement?.id;
+
+	status.textContent = error
+		? `Error: ${(error as Error).message}`
+		: loading
+			? data
+				? "Syncing…"
+				: "Loading…"
+			: "Up to date";
 	status.dataset.state = error ? "error" : loading ? "loading" : "ok";
 	list.replaceChildren(
 		...(data?.todos ?? []).map(function item(todo) {
@@ -145,7 +154,25 @@ ref.subscribe(function render({ data, loading, error }) {
 			box.id = `todo-${todo.id}`;
 			box.checked = todo.done;
 			box.addEventListener("change", function toggle() {
-				client.gql({ query: TOGGLE, variables: { id: todo.id }, invalidates: [["todos"]] }).catch(ignore);
+				client
+					.gql({
+						query: TOGGLE,
+						variables: { id: todo.id },
+						invalidates: [["todos"]],
+						optimistic: [
+							optimistic<Todos, Record<string, never>>(
+								{ key: ["todos"], query: TODOS },
+								function flip(current) {
+									return {
+										todos: (current?.todos ?? []).map(function toggle(item) {
+											return item.id === todo.id ? { ...item, done: !item.done } : item;
+										}),
+									};
+								},
+							),
+						],
+					})
+					.catch(ignore);
 			});
 			label.htmlFor = box.id;
 			label.textContent = todo.title;
@@ -155,6 +182,8 @@ ref.subscribe(function render({ data, loading, error }) {
 			return row;
 		}),
 	);
+	// Rebuilt rows hand keyboard focus back to the same checkbox.
+	if (focused?.startsWith("todo-")) document.getElementById(focused)?.focus();
 });
 
 /**

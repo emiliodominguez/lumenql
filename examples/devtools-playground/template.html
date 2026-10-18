@@ -1,0 +1,297 @@
+<title>lumenql devtools playground</title>
+<meta name="claude:viewport-fit-sides" content="cover" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link
+	rel="stylesheet"
+	href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap"
+/>
+<style>
+	/* Layout: a narrow working column on the left (the app, then the experiments); the devtools panel docks bottom-right. */
+	:root {
+		--bg: #f3f4f7;
+		--surface: #ffffff;
+		--line: #d8dce4;
+		--fg: #182030;
+		--muted: #5a6577;
+		--accent: #a35c00;
+		--accent-soft: #f9ead3;
+		--ok: #1d7f53;
+		--err: #bf3328;
+		--sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+		--mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root:not([data-theme="light"]) {
+			--bg: #0f1217;
+			--surface: #171b23;
+			--line: #2a303b;
+			--fg: #e3e7ee;
+			--muted: #8b95a7;
+			--accent: #f0b347;
+			--accent-soft: #33270f;
+			--ok: #4fc28c;
+			--err: #ff6b5f;
+			color-scheme: dark;
+		}
+	}
+	:root[data-theme="dark"] {
+		--bg: #0f1217;
+		--surface: #171b23;
+		--line: #2a303b;
+		--fg: #e3e7ee;
+		--muted: #8b95a7;
+		--accent: #f0b347;
+		--accent-soft: #33270f;
+		--ok: #4fc28c;
+		--err: #ff6b5f;
+		color-scheme: dark;
+	}
+	body {
+		background: var(--bg);
+		color: var(--fg);
+		font: 15px/1.55 var(--sans);
+		padding-left: max(16px, env(safe-area-inset-left, 0px));
+		padding-right: max(16px, env(safe-area-inset-right, 0px));
+		padding-block: 32px 120px;
+	}
+	main {
+		display: grid;
+		gap: 28px;
+		max-width: 480px;
+	}
+	header {
+		display: grid;
+		gap: 8px;
+	}
+	.wordmark {
+		font: 700 13px/1 var(--mono);
+		letter-spacing: 0.08em;
+	}
+	.wordmark b {
+		color: var(--accent);
+	}
+	h1 {
+		margin: 0;
+		font: 600 26px/1.2 var(--sans);
+		text-wrap: balance;
+	}
+	header p {
+		margin: 0;
+		color: var(--muted);
+		max-width: 60ch;
+	}
+	h2 {
+		margin: 0;
+		font: 600 11px/1 var(--sans);
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+		color: var(--muted);
+	}
+	section {
+		display: grid;
+		gap: 12px;
+	}
+	.app {
+		display: grid;
+		gap: 12px;
+		padding: 16px;
+		background: var(--surface);
+		border: 1px solid var(--line);
+		border-radius: 10px;
+	}
+	.app-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+	}
+	.app-head strong {
+		font-weight: 600;
+	}
+	#status {
+		padding: 2px 8px;
+		border: 1px solid var(--line);
+		border-radius: 999px;
+		font: 500 11px var(--mono);
+		color: var(--muted);
+	}
+	#status[data-state="loading"] {
+		border-color: var(--accent);
+		color: var(--accent);
+	}
+	#status[data-state="error"] {
+		border-color: var(--err);
+		color: var(--err);
+	}
+	#status[data-state="ok"] {
+		border-color: var(--ok);
+		color: var(--ok);
+	}
+	ul {
+		display: grid;
+		gap: 2px;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+	}
+	li {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 6px 4px;
+		border-radius: 6px;
+	}
+	li[data-optimistic="true"] {
+		background: var(--accent-soft);
+	}
+	li[data-optimistic="true"] label::after {
+		content: "optimistic";
+		margin-left: 8px;
+		font: 500 10px var(--mono);
+		color: var(--accent);
+	}
+	input[type="checkbox"] {
+		accent-color: var(--accent);
+		width: 16px;
+		height: 16px;
+	}
+	form {
+		display: flex;
+		gap: 8px;
+	}
+	input[type="text"] {
+		flex: 1;
+		min-width: 0;
+		padding: 8px 10px;
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		background: var(--bg);
+		color: var(--fg);
+		font: inherit;
+	}
+	button {
+		padding: 8px 12px;
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		background: var(--surface);
+		color: var(--fg);
+		font: 500 14px var(--sans);
+		cursor: pointer;
+	}
+	button:hover {
+		border-color: var(--accent);
+	}
+	form button {
+		background: var(--accent);
+		border-color: var(--accent);
+		color: var(--surface);
+	}
+	button:focus-visible,
+	input:focus-visible {
+		outline: 2px solid var(--accent);
+		outline-offset: 2px;
+	}
+	.experiments {
+		display: grid;
+		gap: 10px;
+	}
+	.experiment {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: start;
+		gap: 4px 12px;
+		padding-block: 10px;
+		border-top: 1px solid var(--line);
+	}
+	.experiment p {
+		margin: 0;
+		color: var(--muted);
+		font-size: 14px;
+	}
+	.experiment strong {
+		display: block;
+		color: var(--fg);
+		font-weight: 600;
+	}
+	.experiment code {
+		grid-column: 1 / -1;
+		font: 500 11.5px var(--mono);
+		color: var(--muted);
+		overflow-wrap: anywhere;
+	}
+</style>
+
+<main>
+	<header>
+		<span class="wordmark"><b>lumen</b>ql devtools</span>
+		<h1>Watch a GraphQL client think</h1>
+		<p>
+			A todo app runs on a mock server inside this page. Every action below goes through a real lumenql client; the
+			panel in the corner shows the operations, cache writes, retries and live queries as they happen.
+		</p>
+	</header>
+
+	<section aria-labelledby="app-title">
+		<h2 id="app-title">The app</h2>
+		<div class="app">
+			<div class="app-head">
+				<strong>Team todos</strong>
+				<span id="status" data-state="loading">Loading…</span>
+			</div>
+			<ul id="todos"></ul>
+			<form id="add">
+				<input
+					id="title"
+					type="text"
+					placeholder="Add a todo (type “fail” to see a rollback)"
+					aria-label="New todo"
+				/>
+				<button type="submit">Add</button>
+			</form>
+		</div>
+	</section>
+
+	<section aria-labelledby="try-title">
+		<h2 id="try-title">Try</h2>
+		<div class="experiments">
+			<div class="experiment">
+				<p><strong>Refetch the list</strong>The live query refetches; the panel shows a network operation.</p>
+				<button type="button" data-action="refetch">Refetch</button>
+				<code>query Todos { todos { id title done } }</code>
+			</div>
+			<div class="experiment">
+				<p><strong>Same query twice</strong>Two calls, one request: the second result's source is dedupe.</p>
+				<button type="button" data-action="dedupe">Run twice</button>
+				<code>query Todos · fetchPolicy: network-only × 2</code>
+			</div>
+			<div class="experiment">
+				<p>
+					<strong>Optimistic add that fails</strong>The row appears at once, the server rejects it, the layer rolls
+					back.
+				</p>
+				<button type="button" data-action="fail">Add and fail</button>
+				<code>mutation AddTodo($title: String!) · optimistic + invalidates ["todos"]</code>
+			</div>
+			<div class="experiment">
+				<p><strong>Flaky endpoint</strong>The server answers 503 twice; the client retries with backoff.</p>
+				<button type="button" data-action="retry">Query health</button>
+				<code>query ServerHealth { health { region latency } } · retry: 2</code>
+			</div>
+			<div class="experiment">
+				<p><strong>Stream a deploy</strong>A subscription over Server-Sent Events, one result per step.</p>
+				<button type="button" data-action="stream">Subscribe</button>
+				<code>subscription Deploys { deploy { step status } }</code>
+			</div>
+			<div class="experiment">
+				<p><strong>Invalidate</strong>Drops the cached list; the live query refetches it.</p>
+				<button type="button" data-action="invalidate">Invalidate todos</button>
+				<code>client.invalidate(["todos"])</code>
+			</div>
+		</div>
+	</section>
+</main>
+
+<script>
+	/*BUNDLE*/
+</script>

@@ -10,6 +10,7 @@
 - `defaultOptions` per operation type (`query`, `mutation`, `watch`): fetch and error policies, polling and refetch triggers, under each call's own options.
 - `refetchQueries`: live queries to refetch by operation name after an operation succeeds, next to `invalidates`.
 - `scalars({ field: parser })` plugin (`lumenql/scalars`) and the `result` plugin hook: transform network results before they are cached and returned (e.g. dates).
+- Devtools (`lumenql/devtools`, 5.9 kB, dev-only): `devtools()` plugin or `mountDevtools(client)`. A launcher in a corner shows in-flight and failed operations; the inspector lists operations as a timeline (source, timing, retries, variables, results, errors), cache entries (with invalidation), live queries and every raw event. Shadow DOM, light and dark, no dependencies. A playground lives in `examples/devtools-playground`.
 - `client.on(type, listener)`: an event bus for devtools, logging and telemetry (`operation`, `result` with its source, `error`, `done`, `retry`, `cache`, `invalidate`, `optimistic`, `watch`). Nothing is built while nobody listens. `OperationContext` gains `id` and `stream`.
 
 ### Changed

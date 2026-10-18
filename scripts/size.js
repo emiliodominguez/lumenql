@@ -26,6 +26,7 @@ const IMPORTS = [
 	},
 	{ label: "plugin: incremental", code: 'import { incremental } from "./dist/incremental.js";', budget: 1.75 * 1024 },
 	{ label: "plugin: scalars", code: 'import { scalars } from "./dist/scalars.js";', budget: 1.75 * 1024 },
+	{ label: "devtools", code: 'import { devtools } from "./dist/devtools.js";', budget: 7 * 1024 },
 	{ label: "plugin: sse", code: 'import { sse } from "./dist/sse.js";', budget: 1.75 * 1024 },
 ];
 

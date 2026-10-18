@@ -13,7 +13,11 @@ const BUDGET = 11.75 * 1024;
  */
 const IMPORTS = [
 	{ label: "Client + MemoryCache", code: 'import { Client, MemoryCache } from "./dist/index.js";', budget: BUDGET },
-	{ label: "core: Client + MemoryCache", code: 'import { Client, MemoryCache } from "./dist/core.js";', budget: 9.25 * 1024 },
+	{
+		label: "core: Client + MemoryCache",
+		code: 'import { Client, MemoryCache } from "./dist/core.js";',
+		budget: 9.25 * 1024,
+	},
 	{ label: "plugin: upload", code: 'import { upload } from "./dist/upload.js";', budget: 1.75 * 1024 },
 	{
 		label: "plugin: persistedQueries",

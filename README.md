@@ -30,16 +30,25 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 - **Optimistic updates.** The `optimistic` option updates the UI immediately and rolls back automatically on failure. `client.write()` pushes data to every component watching an entry.
 - **SSR.** `extract()` and `restore()` move the cache from server to browser, and hooks render cached data on the server.
 
+**Extensibility**
+
+- **Lean core, opt-in features.** `lumenql/core` is the bare client (~9 kB); uploads, persisted queries, `@defer`, SSE, scalars and entities are plugins you add one by one. The `lumenql` entry ships them all, configured by the options below.
+- **Plugins.** One small interface with hooks for payloads, headers, bodies, streamed responses and results. Write your own in a few lines.
+- **Events.** `client.on()` exposes operations, results, retries, cache writes, invalidations, optimistic layers and live queries for logging and telemetry. It costs nothing while nobody listens.
+- **Devtools.** An in-page inspector (`lumenql/devtools`) with an operations timeline, the cache, live queries and the event log.
+- **Entities.** The `entities()` plugin keeps an updated entity (`__typename` + `id`) consistent across every cached query, without a normalized cache.
+
 **DX**
 
-- **React.** `useQuery`, `useSuspenseQuery`, `useMutation` and `useSubscription`, safe under `StrictMode` and SSR.
+- **React, Svelte, Vue and Solid.** React hooks (`useQuery`, `useSuspenseQuery`, `useMutation`, `useSubscription`), Svelte stores, Vue composables and Solid primitives over the same live queries.
+- **Error policies and defaults.** Keep partial data next to GraphQL errors (`errorPolicy`), set defaults per operation type (`defaultOptions`), and refetch live queries by name after a mutation (`refetchQueries`).
 - **Typed end to end.** Use the `graphql<TData, TVariables>` tag, generics, or zero-config GraphQL Code Generator documents.
 - **`graphql` tag.** Compose fragments, with duplicated fragment definitions removed automatically.
 - **Typed errors.** `ClientError` carries the status, the GraphQL `errors`, any partial `data` and the raw `Response`.
 
 ## Contents
 
-[Install](#install) · [Quick start](#quick-start) · [Typed documents](#typed-documents) · [Caching](#caching) · [Live queries](#live-queries) · [React](#react) · [SSR](#ssr) · [Auth and headers](#auth-and-headers) · [Retries](#retries) · [Middleware](#middleware) · [GET and persisted queries](#get-requests-and-persisted-queries) · [File uploads](#file-uploads) · [@defer / @stream](#incremental-delivery-defer--stream) · [Subscriptions](#subscriptions-sse) · [WebSocket](#websocket-subscriptions) · [Abort and timeouts](#abort-and-timeouts) · [Errors](#error-handling) · [API](#api) · [Size](#size)
+[Install](#install) · [Quick start](#quick-start) · [Typed documents](#typed-documents) · [Caching](#caching) · [Live queries](#live-queries) · [React](#react) · [SSR](#ssr) · [Auth and headers](#auth-and-headers) · [Retries](#retries) · [Middleware](#middleware) · [GET and persisted queries](#get-requests-and-persisted-queries) · [File uploads](#file-uploads) · [@defer / @stream](#incremental-delivery-defer--stream) · [Subscriptions](#subscriptions-sse) · [WebSocket](#websocket-subscriptions) · [Abort and timeouts](#abort-and-timeouts) · [Errors](#error-handling) · [Plugins and the lean core](#plugins-and-the-lean-core) · [Events](#events) · [Devtools](#devtools) · [API](#api) · [Size](#size)
 
 ## Install
 
@@ -277,33 +286,43 @@ await feed.fetchMore({
 
 `useQuery` and `useSuspenseQuery` return the same `fetchMore`.
 
-### Other frameworks
+### Svelte, Vue and Solid
 
 ```svelte
 <script>
-	const todos = client.watch({ key: ["todos"], query: TODOS }); // a Svelte store as-is
+	import { query, mutation } from "lumenql/svelte";
+
+	const todos = query(client, { key: ["todos"], query: TODOS });
+	const addTodo = mutation(client, ADD_TODO, { invalidates: [["todos"]] });
+	let title = "";
+
+	function add() {
+		addTodo.mutate({ title });
+	}
 </script>
 
 {#if $todos.loading}Loading…{:else}{$todos.data.todos.length} todos{/if}
+<button on:click={add} disabled={$addTodo.loading}>Add</button>
 ```
 
 ```ts
-// Vue: a composable in four lines
-export function useQuery(options) {
-  const state = shallowRef();
-  onScopeDispose(
-    client.watch(options).subscribe(function update(next) {
-      state.value = next;
-    }),
-  );
-  return state;
-}
+// Vue: app.use(lumenql(client)), then in a component
+import { useQuery, useMutation } from "lumenql/vue";
 
-// Vue: keep the client out of reactive proxies (it uses native private fields): `markRaw(client)`
+const { data, loading, refetch } = useQuery(function options() {
+  return { key: ["user", props.id], query: USER, variables: { id: props.id } };
+});
 
-// Solid
-const todos = from(client.watch({ key: ["todos"], query: TODOS }));
+// Solid: <ClientContext.Provider value={client}>, then
+import { createQuery } from "lumenql/solid";
+
+const user = createQuery(function options() {
+  return { key: ["user", props.id], query: USER, variables: { id: props.id } };
+});
+// user().data, user().loading, user.refetch()
 ```
+
+`lumenql/svelte` has no dependency (a live query is already a Svelte store). `lumenql/vue` and `lumenql/solid` use `vue` and `solid-js` as optional peer dependencies. Options given as a ref, getter or accessor switch the query when they change. In Vue, keep the client out of reactive proxies (it uses native private fields): `markRaw(client)` if you store it in reactive state.
 
 ## React
 
@@ -543,7 +562,131 @@ const client = new Client({
 });
 ```
 
-The client throws a `ClientError` when the response contains GraphQL `errors`, when the status is not 2xx (errors in the body are still parsed), when the body is not valid JSON, or when `data` is missing. The library only writes to the console with `debug: true`, or through `console.error` when a live-query listener throws and no `onError` is set.
+The client throws a `ClientError` when the response contains GraphQL `errors`, when the status is not 2xx (errors in the body are still parsed), when the body is not valid JSON, or when `data` is missing. The library only writes to the console with `debug: true`, or through `console.error` when a live-query listener throws (with no `onError` set) or an event listener throws.
+
+## Error policies, defaults and refetching
+
+```ts
+// Partial data next to GraphQL errors: `ignore` returns it, `all` fails but caches it (live queries show both)
+const user = await client.gql({ query: USER, errorPolicy: "ignore" });
+
+const client = new Client({
+  url,
+  cache: new MemoryCache(),
+  defaultOptions: {
+    query: { fetchPolicy: "cache-and-network" },
+    mutation: { errorPolicy: "all" },
+    watch: { refetchOnFocus: true, pollInterval: 60_000 },
+  },
+});
+
+// After a mutation: refetch live queries by operation name, next to (or instead of) key invalidation
+await client.gql({ query: ADD_TODO, variables, refetchQueries: ["Todos", "TodoCount"] });
+```
+
+Parse fields by name with the `scalars()` plugin. Without a schema, the client can't know types, so parsers are keyed by field name:
+
+```ts
+import { scalars } from "lumenql/scalars";
+
+const client = new Client({ url, plugins: [scalars({ createdAt: parseDate, total: Number })] });
+```
+
+Results are cached as parsed. With `StorageCache`, return JSON-serializable values.
+
+### Entities
+
+`entities()` keeps entities consistent across cached results. When a mutation returns `{ __typename: "User", id: "1", name: "Ada Lovelace" }`, every cached query holding `User:1` gets the new `name`, and the live queries showing it re-render. There's no schema, no document parsing and no normalized store:
+
+```ts
+import { entities } from "lumenql/entities";
+
+const client = new Client({ url, cache: new MemoryCache(), plugins: [entities()] });
+```
+
+Select `__typename` (and `id`) in your documents, or pass `identify(value)` for other identities. Only scalar fields present on both sides are copied. An entity added to or removed from a list still needs `invalidates` or `refetchQueries`.
+
+## Plugins and the lean core
+
+`lumenql` is batteries-included. `lumenql/core` is the same client with no built-in plugins, for apps that only pay for what they use:
+
+```ts
+import { Client, MemoryCache } from "lumenql/core";
+import { persistedQueries } from "lumenql/persisted";
+import { sse } from "lumenql/sse";
+
+const client = new Client({ url, cache: new MemoryCache(), plugins: [persistedQueries(), sse()] });
+```
+
+| Plugin                    | Entry                 | Adds                                              |
+| ------------------------- | --------------------- | ------------------------------------------------- |
+| `upload()`                | `lumenql/upload`      | File uploads (multipart request spec)             |
+| `persistedQueries(opts?)` | `lumenql/persisted`   | Automatic Persisted Queries and trusted documents |
+| `incremental()`           | `lumenql/incremental` | `@defer` / `@stream` over `multipart/mixed`       |
+| `sse()`                   | `lumenql/sse`         | Subscriptions and streams over Server-Sent Events |
+| `scalars(parsers)`        | `lumenql/scalars`     | Field parsers (dates, money)                      |
+| `entities(opts?)`         | `lumenql/entities`    | Entity propagation across cached results          |
+| `logger(log?)`            | `lumenql`             | `debug` logging from client events                |
+| `devtools(opts?)`         | `lumenql/devtools`    | The in-page inspector                             |
+
+A plugin is an object with a `name` and any of these hooks. Plugins run in order; a second plugin with the same name is ignored, so passing your own `upload` plugin replaces the built-in one.
+
+```ts
+import type { Plugin } from "lumenql";
+
+const tracing: Plugin = {
+  name: "tracing",
+  // Payload-level middleware (the first plugin is outermost)
+  async send(payload, context, next) {
+    const span = tracer.start(context.name);
+    try {
+      return await next({ ...payload, extensions: { ...payload.extensions, traceId: span.id } });
+    } finally {
+      span.end();
+    }
+  },
+  headers(headers, context) {}, // adjust default headers (Accept...)
+  encode(payload) {}, // return a body to replace JSON (multipart, protobuf...)
+  bypass(variables) {}, // true to skip the cache and dedupe
+  decode(response, signal) {}, // turn a streamed response into JSON payloads
+  merge(state, payload) {}, // merge streamed payloads (return true when handled)
+  result(data, context) {}, // transform network results before caching
+  setup(client) {}, // subscribe to events; return a teardown for client.dispose()
+};
+```
+
+## Events
+
+`client.on(type, listener)` returns an unsubscribe function. Events are only built while someone listens, and listeners run synchronously, so they can timestamp events themselves.
+
+| Event        | When                                                                          |
+| ------------ | ----------------------------------------------------------------------------- |
+| `operation`  | An operation started (`id`, `context`, `fetchPolicy`, `key`)                  |
+| `result`     | A result arrived, with its `source`: `network`, `cache`, `dedupe` or `stream` |
+| `error`      | An operation failed (after retries)                                           |
+| `done`       | A stream ended                                                                |
+| `retry`      | A failed attempt will be retried after `delay` ms                             |
+| `cache`      | Real data landed in the cache                                                 |
+| `invalidate` | An invalidation finished, with the number of removed entries                  |
+| `optimistic` | Optimistic layers were applied to an entry, committed or rolled back          |
+| `watch`      | A live query started or stopped watching an entry                             |
+
+```ts
+client.on("error", function report({ context, error }) {
+  telemetry.capture(error, { operation: context.name, variables: context.variables });
+});
+```
+
+## Devtools
+
+```ts
+import { devtools } from "lumenql/devtools";
+
+const client = new Client({ url, plugins: import.meta.env.DEV ? [devtools()] : [] });
+// or: mountDevtools(client, { open: true, position: "bottom-left", theme: "dark" })
+```
+
+A launcher in the corner shows in-flight and failed operations. The inspector lists operations as a timeline, with source, timing, retries, variables, results and errors. It also shows cache entries (which you can invalidate), live queries and every raw event. It renders in a shadow root and follows the color scheme. It only listens to events, so the client behaves the same with or without it. Try it in `examples/devtools-playground` (`node examples/devtools-playground/build.mjs`).
 
 ## API
 
@@ -564,6 +707,8 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 | `persistedQueries`      | `boolean \| { hash?, strict? }`                | `false`            | Automatic Persisted Queries.                                                                                                                                         |
 | `subscriptionTransport` | `SubscriptionTransport`                        | SSE over `fetch`   | Transport for `subscription` operations.                                                                                                                             |
 | `onError`               | `(error, context) => void`                     | none               | Called once per failed operation (after retries), e.g. to report errors or sign out on 401.                                                                          |
+| `plugins`               | `Plugin[]`                                     | `[]`               | Extensions. See [Plugins](#plugins-and-the-lean-core).                                                                                                               |
+| `defaultOptions`        | `{ query?, mutation?, watch? }`                | none               | Defaults per operation type: fetch and error policies, polling.                                                                                                      |
 | `debug`                 | `boolean`                                      | `false`            | Log operations, timings and cache hits.                                                                                                                              |
 
 ### Methods
@@ -576,23 +721,27 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 | `invalidate(prefix?)`                  | Removes cached results under a key prefix and refetches watchers. Returns the number removed.                                                                |
 | `read(target)` / `write(target, data)` | Reads or writes a cache entry; `write` notifies watchers.                                                                                                    |
 | `extract()` / `restore(snapshot)`      | Serializes the cache or hydrates it (SSR).                                                                                                                   |
+| `on(type, listener)`                   | Listens to [client events](#events). Returns an unsubscribe function.                                                                                        |
+| `dispose()`                            | Runs plugin teardowns (e.g. removes the devtools).                                                                                                           |
 | `extend(overrides): Client`            | Returns a derived client that shares the cache unless you override it. Give each user their own cache.                                                       |
 
 ### `gql` / `watch` options
 
-| Option          | Type                                      | Description                                                       |
-| --------------- | ----------------------------------------- | ----------------------------------------------------------------- |
-| `query`         | `string \| TypedDocumentString`           | The GraphQL document.                                             |
-| `variables`     | `TVariables`                              | Operation variables (may contain files).                          |
-| `operationName` | `string`                                  | Selects the operation when the document has several.              |
-| `key`           | `(string \| number \| boolean \| null)[]` | Hierarchical cache key for grouping and invalidation.             |
-| `fetchPolicy`   | `FetchPolicy`                             | See [Caching](#caching).                                          |
-| `invalidates`   | `CacheKey[]`                              | Cache prefixes to invalidate after success.                       |
-| `optimistic`    | `OptimisticUpdate[]`                      | Cache updates applied immediately and rolled back on failure.     |
-| `headers`       | `HeadersLike`                             | Per-call headers. Calls with these are not deduplicated.          |
-| `signal`        | `AbortSignal`                             | Per-call abort signal. Calls with one are not deduplicated.       |
-| `timeout`       | `number` (ms)                             | Per-call timeout, overrides the client default. Not deduplicated. |
-| `retry`         | `number \| RetryOptions \| false`         | Per-call retry policy. Calls with one are not deduplicated.       |
+| Option           | Type                                      | Description                                                       |
+| ---------------- | ----------------------------------------- | ----------------------------------------------------------------- |
+| `query`          | `string \| TypedDocumentString`           | The GraphQL document.                                             |
+| `variables`      | `TVariables`                              | Operation variables (may contain files).                          |
+| `operationName`  | `string`                                  | Selects the operation when the document has several.              |
+| `key`            | `(string \| number \| boolean \| null)[]` | Hierarchical cache key for grouping and invalidation.             |
+| `fetchPolicy`    | `FetchPolicy`                             | See [Caching](#caching).                                          |
+| `invalidates`    | `CacheKey[]`                              | Cache prefixes to invalidate after success.                       |
+| `refetchQueries` | `string[]`                                | Live queries to refetch by operation name after success.          |
+| `errorPolicy`    | `"none" \| "ignore" \| "all"`             | What GraphQL errors next to data mean. Defaults to `none`.        |
+| `optimistic`     | `OptimisticUpdate[]`                      | Cache updates applied immediately and rolled back on failure.     |
+| `headers`        | `HeadersLike`                             | Per-call headers. Calls with these are not deduplicated.          |
+| `signal`         | `AbortSignal`                             | Per-call abort signal. Calls with one are not deduplicated.       |
+| `timeout`        | `number` (ms)                             | Per-call timeout, overrides the client default. Not deduplicated. |
+| `retry`          | `number \| RetryOptions \| false`         | Per-call retry policy. Calls with one are not deduplicated.       |
 
 ### Caches and helpers
 
@@ -604,11 +753,15 @@ The client throws a `ClientError` when the response contains GraphQL `errors`, w
 
 Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
-| Import                                 | Size     |
-| -------------------------------------- | -------- |
-| `Client` + `MemoryCache` (tree-shaken) | ~10.5 kB |
-| `lumenql/react`                        | ~1.8 kB  |
-| `lumenql/ws`                           | ~1.8 kB  |
+| Import                                               | Size       |
+| ---------------------------------------------------- | ---------- |
+| `Client` + `MemoryCache` from `lumenql` (everything) | ~11.7 kB   |
+| `Client` + `MemoryCache` from `lumenql/core`         | ~9.1 kB    |
+| Each plugin                                          | 0.3–1.7 kB |
+| `lumenql/react`                                      | ~1.8 kB    |
+| `lumenql/svelte` / `vue` / `solid`                   | 0.5–0.8 kB |
+| `lumenql/ws`                                         | ~1.8 kB    |
+| `lumenql/devtools` (development only)                | ~5.9 kB    |
 
 ## Development
 

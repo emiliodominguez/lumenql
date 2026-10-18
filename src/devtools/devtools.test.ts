@@ -12,22 +12,38 @@ const handles: DevtoolsHandle[] = [];
 afterEach(function () {
 	for (const handle of handles.splice(0)) handle.dispose();
 	document.body.replaceChildren();
+	localStorage.clear();
+	vi.unstubAllEnvs();
 });
 
 /**
- * A client answering every query with the given body.
+ * A client answering every request with the given body, counting requests.
  *
  * @param body - The JSON body
- * @returns The client
+ * @returns The client and its fetch mock
  */
-function createClient(body: unknown = { data: { todos: ["a"] } }): Client {
-	return new Client({
-		url: URL,
-		cache: new MemoryCache(),
-		fetch: async function respond() {
-			return Response.json(body);
-		} as typeof fetch,
+function createClient(body: unknown = { data: { todos: ["a"] } }) {
+	const fetchMock = vi.fn(async function respond() {
+		return Response.json(body);
 	});
+	const client = new Client({ url: URL, cache: new MemoryCache(), fetch: fetchMock as unknown as typeof fetch });
+
+	return { client, fetchMock };
+}
+
+/**
+ * Mounts a panel for the test, disposed afterwards.
+ *
+ * @param client - The client
+ * @param options - Panel options
+ * @returns The handle
+ */
+function mount(client: Client, options?: Parameters<typeof mountDevtools>[1]): DevtoolsHandle {
+	const handle = mountDevtools(client, options);
+
+	handles.push(handle);
+
+	return handle;
 }
 
 /**
@@ -62,95 +78,141 @@ function click(text: string): void {
 	target.click();
 }
 
-describe("devtools", function () {
-	it("mounts a launcher that opens the inspector with the operations timeline", async function () {
-		const client = createClient();
+/**
+ * The texts of the list rows.
+ *
+ * @returns One string per row
+ */
+function rows(): string[] {
+	return [...panel().querySelectorAll(".row")].map(function text(row) {
+		return row.textContent ?? "";
+	});
+}
 
-		handles.push(mountDevtools(client));
+describe("devtools", function () {
+	it("shows a launcher that opens the operations list, labelled by where each result came from", async function () {
+		const { client } = createClient();
+
+		mount(client);
 		await client.gql({ query: TODOS });
 		await client.gql({ query: TODOS });
 		await frame();
 
-		expect(panel().querySelector(".launcher")?.textContent).toContain("2 ops");
-		expect(panel().querySelector(".panel")).toBeNull();
+		expect(panel().querySelector(".launcher")?.textContent).toContain("2");
+		expect(panel().querySelector<HTMLElement>(".panel")!.hidden).toBe(true);
 
 		click("lumenql");
 		await frame();
 
-		const rows = [...panel().querySelectorAll(".row")];
-
-		expect(rows).toHaveLength(2);
-		expect(rows[0]!.textContent).toContain("cache");
-		expect(rows[1]!.textContent).toContain("network");
+		expect(rows()).toHaveLength(2);
+		expect(rows()[0]).toContain("cache");
+		expect(rows()[1]).toContain("network");
 	});
 
-	it("shows an operation's variables, result and errors as text, never as markup", async function () {
-		const client = createClient({ errors: [{ message: '<img src=x onerror="window.__pwned=1">' }] });
+	it("opens and closes with the keyboard shortcut and Escape, and remembers it", async function () {
+		const { client } = createClient();
 
-		handles.push(mountDevtools(client, { open: true }));
-		await client.gql({ query: TODOS, variables: { id: "<b>1</b>" } }).catch(function ignore() {});
+		mount(client);
+		window.dispatchEvent(new KeyboardEvent("keydown", { key: "L", ctrlKey: true, shiftKey: true }));
+		await frame();
+		expect(panel().querySelector<HTMLElement>(".panel")!.hidden).toBe(false);
+		expect(JSON.parse(localStorage.getItem("lumenql:devtools")!)).toMatchObject({ open: true });
+
+		panel()
+			.querySelector(".panel")!
+			.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await frame();
+		expect(panel().querySelector<HTMLElement>(".panel")!.hidden).toBe(true);
+	});
+
+	it("filters, shows an operation's result and runs it again", async function () {
+		const { client, fetchMock } = createClient();
+
+		mount(client, { open: true });
+		await client.gql({ query: TODOS });
+		await client.gql({ query: "query Other { other }" }).catch(function ignore() {});
 		await frame();
 
+		const filter = panel().querySelector<HTMLInputElement>(".filter")!;
+
+		filter.value = "todo";
+		filter.dispatchEvent(new Event("input"));
+		await frame();
+		expect(rows()).toHaveLength(1);
+
+		panel().querySelector<HTMLButtonElement>(".row")!.click();
+		await frame();
+		expect(panel().querySelector(".detail h2")?.textContent).toBe("Todos");
+		expect(panel().querySelector(".detail pre")?.textContent).toContain('"todos"');
+
+		click("Run again");
+		await frame();
+		expect(fetchMock).toHaveBeenCalledTimes(3);
+	});
+
+	it("shows server text as text, never as markup", async function () {
+		const { client } = createClient({ errors: [{ message: '<img src=x onerror="window.__pwned=1">' }] });
+
+		mount(client, { open: true });
+		await client.gql({ query: TODOS, variables: { id: "<b>1</b>" } }).catch(function ignore() {});
+		await frame();
 		panel().querySelector<HTMLButtonElement>(".row")!.click();
 		await frame();
 
 		const detail = panel().querySelector(".detail")!;
 
-		expect(detail.querySelector("img")).toBeNull();
-		expect(detail.querySelector(".err-box")?.textContent).toContain("<img src=x");
+		expect(detail.querySelector("img, b:not(h2 b)")).toBeNull();
+		expect(detail.querySelector(".problem")?.textContent).toContain("<img src=x");
 		expect(detail.textContent).toContain('"<b>1</b>"');
 		expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
 	});
 
-	it("lists cache entries and live queries, and invalidates an entry", async function () {
-		const client = createClient();
+	it("lists cache entries, marks the live ones, and invalidates", async function () {
+		const { client } = createClient();
 		const invalidate = vi.spyOn(client, "invalidate");
 
-		handles.push(mountDevtools(client, { open: true }));
+		mount(client, { open: true });
 
-		const ref = client.watch({ key: ["todos"], query: TODOS });
-		const stop = ref.subscribe(function noop() {});
+		const stop = client.watch({ key: ["todos"], query: TODOS }).subscribe(function noop() {});
 
 		await frame();
-		click("Live queries");
-		await frame();
-		expect(panel().querySelector(".row")?.textContent).toContain("todos");
-
 		click("Cache");
 		await frame();
+		expect(rows()[0]).toContain("todos");
+		expect(rows()[0]).toContain("live");
+
 		panel().querySelector<HTMLButtonElement>(".row")!.click();
 		await frame();
-		click("Invalidate entry key");
-
+		click("Invalidate");
 		expect(invalidate).toHaveBeenCalledWith(["todos"]);
 		stop();
 	});
 
-	it("logs every event, pauses and clears", async function () {
-		const client = createClient();
+	it("logs every event and clears", async function () {
+		const { client } = createClient();
 
-		handles.push(mountDevtools(client, { open: true }));
-		click("Events");
+		mount(client, { open: true });
+		click("Log");
 		await client.gql({ query: TODOS });
 		await frame();
-
-		expect(panel().querySelectorAll(".log div").length).toBeGreaterThan(0);
-
-		click("Pause");
-		await frame();
-
-		const logged = panel().querySelectorAll(".log div").length;
-
-		await client.gql({ query: TODOS, fetchPolicy: "network-only" });
-		await frame();
-		expect(panel().querySelectorAll(".log div")).toHaveLength(logged);
+		expect(panel().querySelectorAll(".log p").length).toBeGreaterThan(0);
 
 		click("Clear");
 		await frame();
-		expect(panel().querySelectorAll(".log div")).toHaveLength(0);
+		expect(panel().querySelectorAll(".log p")).toHaveLength(0);
 	});
 
-	it("is a plugin: mounted with the client, removed on dispose(), and stops listening", async function () {
+	it("counts failures on the launcher while closed", async function () {
+		const { client } = createClient({ errors: [{ message: "nope" }] });
+
+		mount(client);
+		await client.gql({ query: TODOS }).catch(function ignore() {});
+		await frame();
+
+		expect(panel().querySelector(".launcher")?.textContent).toContain("1 failed");
+	});
+
+	it("is a one-line plugin, removed on dispose(), and off in production builds unless forced", async function () {
 		const client = new Client({ url: URL, plugins: [devtools({ position: "bottom-left", theme: "dark" })] });
 		const host = document.querySelector<HTMLElement>("[data-lumenql-devtools]")!;
 
@@ -158,19 +220,12 @@ describe("devtools", function () {
 		expect(host.dataset.theme).toBe("dark");
 
 		client.dispose();
-
 		expect(document.querySelector("[data-lumenql-devtools]")).toBeNull();
-	});
 
-	it("closes on Escape", async function () {
-		handles.push(mountDevtools(createClient(), { open: true }));
-		await frame();
+		vi.stubEnv("NODE_ENV", "production");
+		new Client({ url: URL, plugins: [devtools()] });
+		expect(document.querySelector("[data-lumenql-devtools]")).toBeNull();
 
-		panel()
-			.querySelector(".panel")!
-			.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-		await frame();
-
-		expect(panel().querySelector(".panel")).toBeNull();
+		new Client({ url: URL, plugins: [devtools({ force: true })] }).dispose();
 	});
 });

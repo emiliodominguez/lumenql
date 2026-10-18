@@ -679,14 +679,23 @@ client.on("error", function report({ context, error }) {
 
 ## Devtools
 
+One line:
+
 ```ts
 import { devtools } from "lumenql/devtools";
 
-const client = new Client({ url, plugins: import.meta.env.DEV ? [devtools()] : [] });
-// or: mountDevtools(client, { open: true, position: "bottom-left", theme: "dark" })
+const client = new Client({ url, plugins: [devtools()] });
 ```
 
-A launcher in the corner shows in-flight and failed operations. The inspector lists operations as a timeline, with source, timing, retries, variables, results and errors. It also shows cache entries (which you can invalidate), live queries and every raw event. It renders in a shadow root and follows the color scheme. It only listens to events, so the client behaves the same with or without it. Try it in `examples/devtools-playground` (`node examples/devtools-playground/build.mjs`).
+A small launcher appears in the corner. Click it, or press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>.
+
+- **Operations:** every query, mutation and subscription, newest first. Each shows where its result came from (network, cache, deduped, stream) and how long it took. Click one to see its result, error and variables, run it again, or copy them.
+- **Cache:** what's cached, with live queries marked. Invalidate an entry in one click.
+- **Log:** every client event.
+
+The filter box searches the current tab. The panel remembers whether it was open and which tab was showing. It follows the system color scheme, and it only listens to events, so the client behaves the same with or without it. In production builds (`NODE_ENV=production`) the plugin does nothing unless you pass `force: true`. Import it conditionally to keep it out of the bundle entirely. Options: `open`, `position`, `theme`, `shortcut` and `limit`. `mountDevtools(client, options)` does the same without a plugin.
+
+Try it in `examples/devtools-playground` (`node examples/devtools-playground/build.mjs`).
 
 ## API
 

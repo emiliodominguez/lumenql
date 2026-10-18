@@ -2,19 +2,23 @@ import type { Client } from "../core";
 import type { CacheKey, ClientEvents, Plugin } from "../types";
 
 /**
- * Options for {@link devtools}.
+ * Options for {@link devtools} and {@link mountDevtools}.
  */
 export interface DevtoolsOptions {
-	/** Open the panel when it mounts. Defaults to `false` (only the launcher shows). */
+	/** Open the panel when it mounts. Defaults to how it was left last time (closed at first). */
 	open?: boolean | undefined;
-	/** Corner the launcher and panel dock to. Defaults to `bottom-right`. */
+	/** Corner the panel docks to. Defaults to `bottom-right`. */
 	position?: "bottom-right" | "bottom-left" | undefined;
-	/** Color scheme. Defaults to `system` (follows `prefers-color-scheme`). */
+	/** Color scheme. Defaults to `system`. */
 	theme?: "system" | "light" | "dark" | undefined;
-	/** Maximum operations and events kept. Defaults to `300`. */
+	/** Keyboard shortcut toggling the panel, e.g. `"ctrl+shift+l"` (the default). `false` disables it. */
+	shortcut?: string | false | undefined;
+	/** Maximum operations, cache entries and log lines kept. Defaults to `300`. */
 	limit?: number | undefined;
 	/** Element the panel mounts into. Defaults to `document.body`. */
 	container?: HTMLElement | undefined;
+	/** Mount in production builds too (`NODE_ENV=production`). Defaults to `false`: the plugin does nothing there. */
+	force?: boolean | undefined;
 }
 
 /**
@@ -36,18 +40,19 @@ interface OperationRecord {
 	id: number;
 	type: string;
 	name: string;
+	query: string;
 	stream: boolean;
 	fetchPolicy: string;
 	key: string;
 	variables: unknown;
 	startedAt: number;
 	endedAt: number | undefined;
-	status: "pending" | "ok" | "error" | "streaming";
+	status: "pending" | "ok" | "error";
 	source: string;
 	data: unknown;
 	error: unknown;
 	retries: number;
-	results: number;
+	version: number;
 }
 
 /**
@@ -57,23 +62,27 @@ interface CacheRecord {
 	key: string;
 	data: unknown;
 	updatedAt: number;
-	writes: number;
-	optimistic: string | undefined;
+	version: number;
 }
 
 /**
- * A raw event in the log.
+ * A line of the event log.
  */
-interface EventRecord {
+interface LogRecord {
 	at: number;
 	type: keyof ClientEvents;
-	summary: string;
+	text: string;
 }
 
 /**
  * Panel tabs.
  */
-type Tab = "operations" | "cache" | "live" | "events";
+type Tab = "operations" | "cache" | "log";
+
+/**
+ * Where the panel remembers whether it was open and which tab was shown.
+ */
+const STORAGE_KEY = "lumenql:devtools";
 
 /**
  * Characters of JSON shown before truncating (large results would freeze the panel).
@@ -81,134 +90,144 @@ type Tab = "operations" | "cache" | "live" | "events";
 const JSON_LIMIT = 40_000;
 
 /**
+ * Labels for where a result came from.
+ */
+const SOURCES: Record<string, string> = { network: "network", cache: "cache", dedupe: "deduped", stream: "stream" };
+
+/**
  * The panel's styles. Colors are tokens on `:host`, redefined for dark schemes.
  */
 const STYLES = `
-/* Docked inspector: a launcher pill in a corner; the panel opens above it as a rail of tabs, a timeline list and a detail pane. */
+/* A quiet launcher in a corner; the panel opens above it: a header (tabs, filter), a list, and a detail column. */
 :host {
-	--lq-bg: #f5f6f8;
-	--lq-surface: #ffffff;
-	--lq-sunken: #eceef2;
-	--lq-line: #d9dde4;
-	--lq-fg: #1a2130;
-	--lq-muted: #5d687a;
-	--lq-accent: #a75f00;
-	--lq-accent-soft: #fbecd6;
-	--lq-ok: #1d7f53;
-	--lq-err: #bf3328;
-	--lq-err-soft: #fbe3e0;
-	--lq-info: #2c62c9;
-	--lq-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-	--lq-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-	all: initial;
-	position: fixed;
-	display: flex;
-	flex-direction: column;
-	align-items: flex-end;
-	z-index: 2147483000;
-	bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-	right: calc(12px + env(safe-area-inset-right, 0px));
-	font: 12px/1.45 var(--lq-sans);
-	color: var(--lq-fg);
-	color-scheme: light;
+	--paper: #fbf9f5; --raised: #ffffff; --hover: #f3efe7; --line: #e9e3d8; --ink: #1d1a15; --soft: #77705f;
+	--amber: #c47a0c; --amber-wash: #f8ecd6; --ok: #2f8a5b; --bad: #c6402d; --bad-wash: #fbe7e2;
+	--sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+	--mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+	all: initial; position: fixed; z-index: 2147483000; display: flex; flex-direction: column; align-items: flex-end; gap: 10px;
+	bottom: calc(14px + env(safe-area-inset-bottom, 0px)); right: calc(14px + env(safe-area-inset-right, 0px));
+	font: 12.5px/1.5 var(--sans); color: var(--ink); color-scheme: light; -webkit-font-smoothing: antialiased;
 }
-:host([data-position="bottom-left"]) { right: auto; left: calc(12px + env(safe-area-inset-left, 0px)); align-items: flex-start; }
+:host([data-position="bottom-left"]) { right: auto; left: calc(14px + env(safe-area-inset-left, 0px)); align-items: flex-start; }
 :host([data-theme="dark"]) {
-	--lq-bg: #11141a; --lq-surface: #181c24; --lq-sunken: #0d1015; --lq-line: #2a303b; --lq-fg: #e3e7ee;
-	--lq-muted: #8b95a7; --lq-accent: #f0b347; --lq-accent-soft: #3a2c12; --lq-ok: #4fc28c; --lq-err: #ff6b5f;
-	--lq-err-soft: #3d1a17; --lq-info: #74a6ff; color-scheme: dark;
+	--paper: #16140f; --raised: #1d1a15; --hover: #24211b; --line: #2f2b24; --ink: #efe9df; --soft: #9b9385;
+	--amber: #f1b44a; --amber-wash: #33270f; --ok: #5fc792; --bad: #ff7b67; --bad-wash: #3a1d17; color-scheme: dark;
 }
 @media (prefers-color-scheme: dark) {
 	:host(:not([data-theme="light"])) {
-		--lq-bg: #11141a; --lq-surface: #181c24; --lq-sunken: #0d1015; --lq-line: #2a303b; --lq-fg: #e3e7ee;
-		--lq-muted: #8b95a7; --lq-accent: #f0b347; --lq-accent-soft: #3a2c12; --lq-ok: #4fc28c; --lq-err: #ff6b5f;
-		--lq-err-soft: #3d1a17; --lq-info: #74a6ff; color-scheme: dark;
+		--paper: #16140f; --raised: #1d1a15; --hover: #24211b; --line: #2f2b24; --ink: #efe9df; --soft: #9b9385;
+		--amber: #f1b44a; --amber-wash: #33270f; --ok: #5fc792; --bad: #ff7b67; --bad-wash: #3a1d17; color-scheme: dark;
 	}
 }
 * { box-sizing: border-box; }
-button { font: inherit; color: inherit; cursor: pointer; }
-button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--lq-accent); outline-offset: 1px; }
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+.dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+.dot.ok { background: var(--ok); } .dot.error { background: var(--bad); } .dot.pending { background: var(--amber); }
+.dot.live { background: var(--amber); box-shadow: 0 0 0 3px var(--amber-wash); }
 .launcher {
-	display: flex; align-items: center; gap: 8px; padding: 6px 10px 6px 8px;
-	background: var(--lq-surface); border: 1px solid var(--lq-line); border-radius: 999px;
-	box-shadow: 0 4px 16px rgb(0 0 0 / 0.12); font: 600 11px/1 var(--lq-mono); letter-spacing: 0.06em;
+	display: inline-flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px 0 11px;
+	background: var(--raised); border: 1px solid var(--line); border-radius: 999px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.1);
 }
-.meter { display: flex; gap: 2px; align-items: flex-end; height: 12px; }
-.meter i { width: 3px; border-radius: 1px; background: var(--lq-line); }
-.meter i.on { background: var(--lq-accent); }
-.meter i:nth-child(1) { height: 5px; } .meter i:nth-child(2) { height: 8px; } .meter i:nth-child(3) { height: 12px; }
-.count { color: var(--lq-muted); font-weight: 500; font-variant-numeric: tabular-nums; }
-.count.err { color: var(--lq-err); }
+.launcher:hover { border-color: var(--amber); }
+.word { font: 600 12px/1 var(--sans); letter-spacing: -0.01em; }
+.word b { font-weight: 600; color: var(--amber); }
+.tally { font: 11px/1 var(--mono); color: var(--soft); font-variant-numeric: tabular-nums; }
+.tally.bad { color: var(--bad); }
 .panel {
-	display: grid; grid-template-rows: auto minmax(0, 1fr); grid-template-columns: minmax(0, 1fr); width: min(760px, calc(100vw - 24px)); height: min(460px, calc(100vh - 80px));
-	margin-bottom: 8px; background: var(--lq-bg); border: 1px solid var(--lq-line); border-radius: 10px; overflow: hidden;
-	box-shadow: 0 12px 40px rgb(0 0 0 / 0.18);
+	display: grid; grid-template-rows: auto minmax(0, 1fr); width: min(720px, calc(100vw - 28px)); height: min(430px, calc(100vh - 100px));
+	background: var(--paper); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; box-shadow: 0 18px 50px rgb(0 0 0 / 0.16);
 }
-.bar { display: flex; align-items: center; gap: 4px; min-width: 0; padding: 6px 8px; border-bottom: 1px solid var(--lq-line); background: var(--lq-surface); }
-.mark { font: 700 11px/1 var(--lq-mono); letter-spacing: 0.08em; text-transform: lowercase; margin-right: 8px; }
-.mark b { color: var(--lq-accent); }
-.tabs { display: flex; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; }
-.tab { padding: 4px 8px; border: 0; border-radius: 6px; background: none; color: var(--lq-muted); white-space: nowrap; }
-.tab[aria-selected="true"] { background: var(--lq-accent-soft); color: var(--lq-fg); }
-.tab span { margin-left: 4px; font: 11px var(--lq-mono); font-variant-numeric: tabular-nums; }
-.tool { padding: 4px 8px; border: 1px solid var(--lq-line); border-radius: 6px; background: var(--lq-surface); color: var(--lq-muted); }
-.tool[aria-pressed="true"] { color: var(--lq-accent); border-color: var(--lq-accent); }
-.body { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); min-height: 0; }
-.list { overflow: auto; border-right: 1px solid var(--lq-line); }
-.detail { overflow: auto; padding: 10px 12px; background: var(--lq-surface); min-width: 0; }
-.row {
-	display: grid; grid-template-columns: 22px minmax(0, 1fr) auto 56px; align-items: center; gap: 8px; width: 100%;
-	padding: 6px 10px; border: 0; border-bottom: 1px solid var(--lq-line); background: none; text-align: left;
-}
-.row:hover { background: var(--lq-sunken); }
-.row[aria-selected="true"] { background: var(--lq-accent-soft); }
-.op { display: grid; place-items: center; width: 20px; height: 20px; border-radius: 5px; font: 700 10px var(--lq-mono); background: var(--lq-sunken); color: var(--lq-muted); }
-.op.mutation { color: var(--lq-accent); }
-.op.subscription { color: var(--lq-info); }
-.name { min-width: 0; }
-.name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.name small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--lq-muted); font: 10.5px var(--lq-mono); }
-.chip { padding: 1px 6px; border: 1px solid var(--lq-line); border-radius: 999px; font: 10px var(--lq-mono); color: var(--lq-muted); white-space: nowrap; }
-.chip.error { border-color: var(--lq-err); color: var(--lq-err); background: var(--lq-err-soft); }
-.chip.pending, .chip.streaming { border-color: var(--lq-accent); color: var(--lq-accent); }
-.chip.ok { border-color: var(--lq-ok); color: var(--lq-ok); }
-.time { display: grid; gap: 3px; justify-items: end; font: 10.5px var(--lq-mono); color: var(--lq-muted); font-variant-numeric: tabular-nums; }
-.wf { position: relative; width: 56px; height: 3px; border-radius: 2px; background: var(--lq-sunken); }
-.wf i { position: absolute; top: 0; bottom: 0; min-width: 2px; border-radius: 2px; background: var(--lq-info); }
-.wf i.error { background: var(--lq-err); } .wf i.pending, .wf i.streaming { background: var(--lq-accent); }
-.empty { padding: 24px 16px; color: var(--lq-muted); line-height: 1.6; }
-.empty code { font-family: var(--lq-mono); color: var(--lq-fg); }
-h3 { margin: 0 0 6px; font: 600 13px var(--lq-sans); overflow-wrap: anywhere; }
-h4 { margin: 14px 0 6px; font: 600 10px var(--lq-sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--lq-muted); }
-dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 12px; margin: 0; }
-dt { color: var(--lq-muted); }
-dd { margin: 0; font-family: var(--lq-mono); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-pre { margin: 0; padding: 8px 10px; max-height: 260px; overflow: auto; background: var(--lq-sunken); border-radius: 6px; font: 11px/1.5 var(--lq-mono); white-space: pre; }
-.k { color: var(--lq-info); } .s { color: var(--lq-ok); } .n { color: var(--lq-accent); } .l { color: var(--lq-muted); }
-.err-box { padding: 8px 10px; border-left: 3px solid var(--lq-err); background: var(--lq-err-soft); border-radius: 0 6px 6px 0; overflow-wrap: anywhere; }
+header { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--line); min-width: 0; }
+.tabs { display: flex; gap: 2px; padding: 2px; background: var(--hover); border-radius: 8px; }
+.tab { display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border: 0; border-radius: 6px; background: none; color: var(--soft); white-space: nowrap; }
+.tab[aria-selected="true"] { background: var(--raised); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); }
+.tab small { font: 10.5px var(--mono); color: var(--soft); font-variant-numeric: tabular-nums; }
+.filter { flex: 1; min-width: 60px; height: 28px; padding: 0 10px; border: 1px solid transparent; border-radius: 8px; background: none; outline: none; }
+.filter::placeholder { color: var(--soft); }
+.filter:focus { border-color: var(--line); background: var(--raised); }
+.ghost { height: 28px; padding: 0 10px; border: 0; border-radius: 8px; background: none; color: var(--soft); }
+.ghost:hover { background: var(--hover); color: var(--ink); }
+.close { width: 28px; padding: 0; font-size: 16px; line-height: 1; }
+.body { display: grid; grid-template-columns: minmax(0, 1fr); min-height: 0; }
+.body.split { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); }
+.list { overflow: auto; padding: 6px; }
+.body.split .list { border-right: 1px solid var(--line); }
+.row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 40px; padding: 6px 10px; border: 0; border-radius: 8px; background: none; text-align: left; }
+.row:hover { background: var(--hover); }
+.row[aria-selected="true"] { background: var(--amber-wash); }
+.what { flex: 1; min-width: 0; }
+.what b, .what span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.what b { font-weight: 550; }
+.what span { font-size: 11px; color: var(--soft); }
+.meta { flex: none; display: flex; align-items: baseline; gap: 10px; font: 11px var(--mono); color: var(--soft); font-variant-numeric: tabular-nums; }
+.meta .tag.error { color: var(--bad); } .meta .tag.pending { color: var(--amber); }
+.ms { min-width: 46px; text-align: right; }
+.detail { overflow: auto; padding: 16px 18px 20px; background: var(--raised); }
+.back { display: none; margin: -6px 0 8px -8px; }
+h2 { margin: 0; font: 600 15px/1.3 var(--sans); letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.line { margin: 4px 0 0; font: 11px var(--mono); color: var(--soft); overflow-wrap: anywhere; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
-.log { font: 11px var(--lq-mono); }
-.log div { display: grid; grid-template-columns: 74px 82px minmax(0, 1fr); gap: 8px; padding: 3px 10px; border-bottom: 1px solid var(--lq-line); }
-.log time { color: var(--lq-muted); font-variant-numeric: tabular-nums; }
-.log b { font-weight: 600; color: var(--lq-accent); }
+.action { height: 28px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--raised); }
+.action:hover { border-color: var(--amber); }
+h3 { margin: 18px 0 6px; font: 600 10.5px var(--sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--soft); }
+pre { margin: 0; padding: 10px 12px; max-height: 280px; overflow: auto; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; font: 11.5px/1.55 var(--mono); white-space: pre; tab-size: 2; }
+.k { color: var(--ink); } .s { color: var(--ok); } .n { color: var(--amber); } .l { color: var(--soft); }
+.problem { padding: 10px 12px; background: var(--bad-wash); color: var(--bad); border-radius: 8px; overflow-wrap: anywhere; }
+.empty { display: grid; place-content: center; gap: 4px; height: 100%; min-height: 120px; padding: 24px; text-align: center; color: var(--soft); }
+.empty b { color: var(--ink); font-weight: 550; }
+.log { padding: 6px 4px; font: 11px/1.5 var(--mono); }
+.log p { display: grid; grid-template-columns: 64px 76px minmax(0, 1fr); gap: 10px; margin: 0; padding: 3px 10px; border-radius: 6px; }
+.log p:hover { background: var(--hover); }
+.log time { color: var(--soft); font-variant-numeric: tabular-nums; }
+.log i { font-style: normal; color: var(--amber); }
 .log span { overflow-wrap: anywhere; }
-@media (max-width: 560px) {
-	.body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
-	.list { border-right: 0; border-bottom: 1px solid var(--lq-line); }
-	.mark { display: none; }
+@media (max-width: 600px) {
+	.panel { height: min(520px, calc(100vh - 90px)); }
+	header { flex-wrap: wrap; row-gap: 8px; }
+	header .word { display: none; }
+	.tabs { flex: 1; }
+	.filter { order: 3; flex-basis: 100%; border-color: var(--line); }
+	.body.split { grid-template-columns: minmax(0, 1fr); }
+	.body.split .list { display: none; }
+	.back { display: inline-flex; align-items: center; }
+	.log p { grid-template-columns: 76px minmax(0, 1fr); }
+	.log time { display: none; }
 }
 @media (prefers-reduced-motion: no-preference) {
-	.chip.pending, .chip.streaming, .meter i.on { animation: lq-pulse 1.2s ease-in-out infinite; }
-	@keyframes lq-pulse { 50% { opacity: 0.45; } }
+	.dot.pending { animation: glow 1.1s ease-in-out infinite; }
+	.panel { animation: rise 160ms ease-out; }
+	@keyframes glow { 50% { opacity: 0.35; } }
+	@keyframes rise { from { opacity: 0; transform: translateY(6px); } }
 }
 `;
 
 /**
- * Creates an element with attributes and children. Text is always set as text, never parsed as HTML: results come
- * from the server and must not inject markup.
+ * Declared locally: bundlers replace `process.env.NODE_ENV` at build time; elsewhere it may not exist.
+ */
+declare const process: { env: Record<string, string | undefined> };
+
+/**
+ * Whether this is a production build.
+ *
+ * @returns `true` when `NODE_ENV` is `production`
+ */
+function isProduction(): boolean {
+	try {
+		return process.env.NODE_ENV === "production";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Creates an element. Text is always set as text, never parsed as HTML: results come from the server and must not
+ * inject markup.
  *
  * @param tag - The tag name
- * @param attributes - Attributes (`class`, `aria-*`, `data-*`...); `undefined` values are skipped
+ * @param attributes - Attributes; `undefined` values are skipped
  * @param children - Child nodes or text
  * @returns The element
  */
@@ -226,12 +245,34 @@ function h(
 }
 
 /**
- * Renders a value as highlighted, truncated JSON.
+ * Creates a button.
+ *
+ * @param label - The visible label
+ * @param className - Its class
+ * @param action - What it does
+ * @param attributes - More attributes
+ * @returns The button
+ */
+function button(
+	label: string,
+	className: string,
+	action: (event: MouseEvent) => void,
+	attributes: Record<string, string | undefined> = {},
+): HTMLElement {
+	const element = h("button", { type: "button", class: className, ...attributes }, label);
+
+	element.addEventListener("click", action);
+
+	return element;
+}
+
+/**
+ * Serializes a value as indented JSON, truncated past {@link JSON_LIMIT} characters.
  *
  * @param value - Any value
- * @returns A `pre` element
+ * @returns The JSON text
  */
-function json(value: unknown): HTMLElement {
+function stringify(value: unknown): string {
 	let text: string;
 
 	try {
@@ -240,18 +281,25 @@ function json(value: unknown): HTMLElement {
 		text = String(value);
 	}
 
-	if (text.length > JSON_LIMIT) text = `${text.slice(0, JSON_LIMIT)}\n… (${text.length - JSON_LIMIT} more characters)`;
+	return text.length > JSON_LIMIT ? `${text.slice(0, JSON_LIMIT)}\n… ${text.length - JSON_LIMIT} more characters` : text;
+}
 
+/**
+ * Renders a value as highlighted JSON.
+ *
+ * @param value - Any value
+ * @returns A `pre` element
+ */
+function json(value: unknown): HTMLElement {
+	const text = stringify(value);
 	const pre = h("pre");
 	const token = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(true|false|null)\b|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
 	let index = 0;
 
 	for (let match = token.exec(text); match; match = token.exec(text)) {
-		pre.append(text.slice(index, match.index));
-
 		const kind = match[1] ? (match[2] ? "k" : "s") : match[3] ? "l" : "n";
 
-		pre.append(h("span", { class: kind }, match[1] ?? match[0]));
+		pre.append(text.slice(index, match.index), h("span", { class: kind }, match[1] ?? match[0]));
 		if (match[2]) pre.append(match[2]);
 		index = token.lastIndex;
 	}
@@ -265,686 +313,715 @@ function json(value: unknown): HTMLElement {
  * Formats a duration.
  *
  * @param ms - Milliseconds
- * @returns The duration, e.g. `42ms` or `1.3s`
+ * @returns `42 ms` or `1.3 s`
  */
-function formatDuration(ms: number): string {
-	return ms < 1_000 ? `${Math.round(ms)}ms` : `${(ms / 1_000).toFixed(1)}s`;
+function duration(ms: number): string {
+	return ms < 1_000 ? `${Math.max(0, Math.round(ms))} ms` : `${(ms / 1_000).toFixed(1)} s`;
 }
 
 /**
- * Formats a clock time with milliseconds.
+ * Formats a clock time.
  *
  * @param at - A timestamp
- * @returns `hh:mm:ss.mmm`
+ * @returns `hh:mm:ss`
  */
-function formatClock(at: number): string {
-	const date = new Date(at);
-
-	return `${date.toTimeString().slice(0, 8)}.${String(date.getMilliseconds()).padStart(3, "0")}`;
+function clock(at: number): string {
+	return new Date(at).toTimeString().slice(0, 8);
 }
 
 /**
- * Describes a serialized cache key: its user key, variables and operation name.
+ * Describes a serialized cache key: its user key, and its operation and variables.
  *
  * @param key - A serialized cache key
- * @returns A readable label and detail
+ * @returns A label, a detail line and the user key
  */
 function describeKey(key: string): { label: string; detail: string; prefix: CacheKey | undefined } {
 	try {
 		const [prefix, , variables, operationName] = JSON.parse(key) as [CacheKey, string, unknown, string | null];
-		const label = prefix.length ? prefix.map(String).join(" › ") : "(no key)";
-		const detail = [operationName, variables === null ? "" : JSON.stringify(variables)].filter(Boolean).join(" ");
 
-		return { label, detail, prefix };
+		return {
+			label: prefix.length ? prefix.map(String).join(" / ") : "no key",
+			detail: [operationName, variables === null ? "" : JSON.stringify(variables)].filter(Boolean).join(" "),
+			prefix,
+		};
 	} catch {
 		return { label: key, detail: "", prefix: undefined };
 	}
 }
 
 /**
- * Summarizes an error for a list.
+ * The message of a thrown value.
  *
  * @param error - Any thrown value
  * @returns Its message
  */
-function errorMessage(error: unknown): string {
+function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Mounts the devtools panel for a client: a launcher pill in a corner showing in-flight operations and errors, and
- * an inspector with the operations timeline (source, timing, variables, results, errors, retries), the cache
- * (entries, writes, optimistic layers, invalidation), live queries and the raw event log. It only listens to the
- * client's events, so the client behaves exactly the same with or without it. Does nothing outside a browser.
+ * Parses a shortcut like `ctrl+shift+l` into a keyboard event matcher.
+ *
+ * @param shortcut - The shortcut
+ * @returns Whether an event matches it
+ */
+function matcher(shortcut: string): (event: KeyboardEvent) => boolean {
+	const parts = shortcut.toLowerCase().split("+");
+	const key = parts.pop();
+
+	return function matches(event: KeyboardEvent): boolean {
+		return (
+			event.key?.toLowerCase() === key &&
+			event.ctrlKey === parts.includes("ctrl") &&
+			event.shiftKey === parts.includes("shift") &&
+			event.altKey === parts.includes("alt") &&
+			event.metaKey === parts.includes("meta")
+		);
+	};
+}
+
+/**
+ * Reads what the panel remembered.
+ *
+ * @returns The remembered state
+ */
+function recall(): { open?: boolean; tab?: Tab } {
+	try {
+		return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "{}") as { open?: boolean; tab?: Tab };
+	} catch {
+		return {};
+	}
+}
+
+/**
+ * Remembers whether the panel is open and which tab it shows.
+ *
+ * @param state - The state
+ */
+function remember(state: { open: boolean; tab: Tab }): void {
+	try {
+		localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+	} catch {
+		// Storage unavailable: the panel just starts closed next time.
+	}
+}
+
+/**
+ * Mounts the devtools panel for a client. A small launcher sits in a corner (click it, or press `Ctrl+Shift+L`).
+ * The panel lists operations with where each result came from and how long it took, the cache with the live
+ * queries watching it, and a log of every event. Click an operation to see its variables, result or error, run it
+ * again or copy its data. The panel only listens to the client's events, so the client behaves the same with or
+ * without it. Does nothing outside a browser.
  *
  * @example
- * import { mountDevtools } from "lumenql/devtools";
- *
- * if (import.meta.env.DEV) mountDevtools(client);
+ * mountDevtools(client);
  *
  * @param client - The client to inspect
  * @param options - Panel options
  * @returns Controls for the panel
  */
 export function mountDevtools(client: Client, options: DevtoolsOptions = {}): DevtoolsHandle {
-	if (typeof document === "undefined") {
-		return { open: noop, close: noop, dispose: noop };
-	}
+	if (typeof document === "undefined") return { open: noop, close: noop, dispose: noop };
 
 	const limit = options.limit ?? 300;
+	const remembered = recall();
 	const operations = new Map<number, OperationRecord>();
 	const entries = new Map<string, CacheRecord>();
-	const live = new Map<string, number>();
-	const events: EventRecord[] = [];
+	const watchers = new Map<string, number>();
+	const log: LogRecord[] = [];
+	const shortcutLabel = options.shortcut === false ? undefined : (options.shortcut ?? "ctrl+shift+l");
+	const shortcut = shortcutLabel === undefined ? undefined : matcher(shortcutLabel);
+	let isOpen = options.open ?? remembered.open === true;
+	let tab: Tab = remembered.tab === "cache" || remembered.tab === "log" ? remembered.tab : "operations";
+	let selected: string | number | undefined;
+	let failures = 0;
+	let frame: number | undefined;
+	let shown = "";
+
 	const host = h("div", {
 		"data-lumenql-devtools": "",
 		"data-position": options.position ?? "bottom-right",
 		"data-theme": options.theme === "system" ? undefined : options.theme,
 	});
 	const root = host.attachShadow({ mode: "open" });
-	let isOpen = options.open === true;
-	let paused = false;
-	let tab: Tab = "operations";
-	let selected: string | number | undefined;
-	let frame: number | undefined;
+	const tabs = h("div", { class: "tabs", role: "tablist" });
+	const filter = h("input", { class: "filter", type: "search", placeholder: "Filter", "aria-label": "Filter" });
+	const list = h("div", { class: "list" });
+	const detail = h("div", { class: "detail" });
+	const body = h("div", { class: "body" }, list, detail);
+	const panel = h(
+		"section",
+		{ class: "panel", role: "dialog", "aria-label": "lumenql devtools" },
+		h(
+			"header",
+			{},
+			h("span", { class: "word" }, h("b", {}, "lumen"), "ql"),
+			tabs,
+			filter,
+			button("Clear", "ghost", function clear(): void {
+				operations.clear();
+				log.length = 0;
+				failures = 0;
+				selected = undefined;
+				update();
+			}),
+			button("×", "ghost close", close, { "aria-label": "Close devtools" }),
+		),
+		body,
+	);
+	const launcher = h("button", { type: "button", class: "launcher" });
 
-	root.append(h("style", {}, STYLES));
+	launcher.addEventListener("click", function toggle(): void {
+		if (isOpen) close();
+		else open();
+	});
+	filter.addEventListener("input", update);
+	root.append(h("style", {}, STYLES), panel, launcher);
 	(options.container ?? document.body).append(host);
 
 	/**
-	 * Schedules a render on the next animation frame (events can arrive in bursts).
+	 * Schedules a render on the next frame: events arrive in bursts.
 	 */
-	function invalidateView(): void {
+	function update(): void {
 		if (frame === undefined) frame = requestAnimationFrame(render);
 	}
 
 	/**
-	 * Keeps a list bounded, dropping the oldest items.
+	 * Opens the panel.
+	 */
+	function open(): void {
+		isOpen = true;
+		failures = 0;
+		loadCache();
+		remember({ open: true, tab });
+		update();
+	}
+
+	/**
+	 * Closes the panel.
+	 */
+	function close(): void {
+		isOpen = false;
+		remember({ open: false, tab });
+		update();
+	}
+
+	/**
+	 * Adds a log line.
 	 *
-	 * @param map - Records by key, in insertion order
+	 * @param type - The event type
+	 * @param text - What happened
+	 */
+	function write(type: keyof ClientEvents, text: string): void {
+		log.push({ at: Date.now(), type, text });
+		if (log.length > limit) log.shift();
+		update();
+	}
+
+	/**
+	 * Updates a tracked operation.
+	 *
+	 * @param id - The operation id
+	 * @param change - Applies the change
+	 */
+	function touch(id: number | undefined, change: (record: OperationRecord) => void): void {
+		const record = id === undefined ? undefined : operations.get(id);
+
+		if (!record) return;
+
+		change(record);
+		record.version++;
+	}
+
+	/**
+	 * Keeps a map bounded, dropping its oldest items.
+	 *
+	 * @param map - Items in insertion order
 	 */
 	function trim<K, V>(map: Map<K, V>): void {
 		while (map.size > limit) map.delete(map.keys().next().value as K);
 	}
 
 	/**
-	 * Records a raw event.
-	 *
-	 * @param type - The event type
-	 * @param summary - One line about it
+	 * Loads what is already cached (entries written before the panel mounted).
 	 */
-	function log(type: keyof ClientEvents, summary: string): void {
-		if (paused) return;
+	function loadCache(): void {
+		client.extract().then(function fill(snapshot: Record<string, unknown>): void {
+			for (const [key, data] of Object.entries(snapshot)) {
+				if (!entries.has(key)) entries.set(key, { key, data, updatedAt: Date.now(), version: 0 });
+			}
 
-		events.push({ at: Date.now(), type, summary });
-		if (events.length > limit) events.shift();
-		invalidateView();
-	}
-
-	/**
-	 * The record of an operation, if it is tracked.
-	 *
-	 * @param id - The operation id
-	 * @returns The record
-	 */
-	function operation(id: number | undefined): OperationRecord | undefined {
-		return id === undefined ? undefined : operations.get(id);
+			trim(entries);
+			update();
+		}, noop);
 	}
 
 	const stops = [
 		client.on("operation", function started({ id, context, fetchPolicy, key }): void {
-			log("operation", `#${id} ${context.type} ${context.name ?? "(anonymous)"} · ${fetchPolicy}`);
-			if (paused) return;
-
 			operations.set(id, {
 				id,
 				type: context.type,
-				name: context.name ?? "(anonymous)",
+				name: context.name ?? "anonymous",
+				query: context.query,
 				stream: context.stream === true,
 				fetchPolicy,
 				key,
 				variables: context.variables,
 				startedAt: Date.now(),
 				endedAt: undefined,
-				status: context.stream ? "streaming" : "pending",
+				status: "pending",
 				source: context.stream ? "stream" : "network",
 				data: undefined,
 				error: undefined,
 				retries: 0,
-				results: 0,
+				version: 0,
 			});
 			trim(operations);
+			write("operation", `${context.type} ${context.name ?? "anonymous"}`);
 		}),
 		client.on("result", function resulted({ id, source, data }): void {
-			const record = operation(id);
+			touch(id, function settle(record: OperationRecord): void {
+				record.data = data;
+				record.source = source;
 
-			log("result", `#${id} ${source}`);
-			if (!record) return;
-
-			record.data = data;
-			record.source = source;
-			record.results++;
-
-			if (source !== "stream") {
-				record.status = "ok";
-				record.endedAt = Date.now();
-			}
+				if (source !== "stream") {
+					record.status = "ok";
+					record.endedAt = Date.now();
+				}
+			});
+			write("result", `#${id} ${SOURCES[source] ?? source}`);
 		}),
 		client.on("error", function failed({ id, error }): void {
-			const record = operation(id);
-
-			log("error", `#${id} ${errorMessage(error)}`);
-			if (!record) return;
-
-			record.status = "error";
-			record.error = error;
-			record.endedAt = Date.now();
+			touch(id, function fail(record: OperationRecord): void {
+				record.status = "error";
+				record.error = error;
+				record.endedAt = Date.now();
+			});
+			if (!isOpen) failures++;
+			write("error", `#${id} ${message(error)}`);
 		}),
 		client.on("done", function ended({ id }): void {
-			const record = operation(id);
-
-			log("done", `#${id} stream ended`);
-			if (!record) return;
-
-			record.status = "ok";
-			record.endedAt = Date.now();
-		}),
-		client.on("retry", function retried({ context, delay, attempts, error }): void {
-			const record = operation(context.id);
-
-			log(
-				"retry",
-				`#${context.id} ${context.attempt + 1}/${attempts} in ${formatDuration(delay)}: ${errorMessage(error)}`,
-			);
-			if (record) record.retries = context.attempt + 1;
-		}),
-		client.on("cache", function written({ key, data }): void {
-			const record = entries.get(key);
-
-			log("cache", describeKey(key).label);
-			if (paused) return;
-
-			entries.set(key, {
-				key,
-				data,
-				updatedAt: Date.now(),
-				writes: (record?.writes ?? 0) + 1,
-				optimistic: record?.optimistic,
+			touch(id, function finish(record: OperationRecord): void {
+				record.status = "ok";
+				record.endedAt = Date.now();
 			});
+			write("done", `#${id} stream ended`);
+		}),
+		client.on("retry", function retried({ context, delay, attempts }): void {
+			touch(context.id, function count(record: OperationRecord): void {
+				record.retries = context.attempt + 1;
+			});
+			write("retry", `#${context.id} attempt ${context.attempt + 2}/${attempts + 1} in ${duration(delay)}`);
+		}),
+		client.on("cache", function cached({ key, data }): void {
+			const version = (entries.get(key)?.version ?? 0) + 1;
+
+			// Re-inserted: the most recently written entries come first.
+			entries.delete(key);
+			entries.set(key, { key, data, updatedAt: Date.now(), version });
 			trim(entries);
+			write("cache", describeKey(key).label);
 		}),
 		client.on("invalidate", function invalidated({ prefix, removed }): void {
-			log("invalidate", `[${prefix.map(String).join(", ")}] · ${removed} removed`);
-			if (paused) return;
-
 			for (const key of [...entries.keys()]) {
 				const { prefix: entryPrefix } = describeKey(key);
 
 				if (
 					entryPrefix &&
-					prefix.every(function same(segment, index): boolean {
+					prefix.every(function same(segment: unknown, index: number): boolean {
 						return entryPrefix[index] === segment;
 					})
 				) {
 					entries.delete(key);
 				}
 			}
+
+			write("invalidate", `${prefix.length ? prefix.map(String).join(" / ") : "everything"} · ${removed} removed`);
 		}),
 		client.on("optimistic", function layered({ key, phase }): void {
-			const record = entries.get(key);
-
-			log("optimistic", `${describeKey(key).label} · ${phase}`);
-			if (record) record.optimistic = phase === "apply" ? "optimistic" : undefined;
+			write("optimistic", `${describeKey(key).label} · ${phase}`);
 		}),
-		client.on("watch", function watched({ key, watchers }): void {
-			log("watch", `${describeKey(key).label} · ${watchers} watching`);
-			if (paused) return;
+		client.on("watch", function watched({ key, watchers: count }): void {
+			if (count > 0) watchers.set(key, count);
+			else watchers.delete(key);
 
-			if (watchers > 0) live.set(key, watchers);
-			else live.delete(key);
+			write("watch", `${describeKey(key).label} · ${count} watching`);
 		}),
 	];
 
 	/**
-	 * Loads the entries already cached when the panel opens.
-	 */
-	function loadCache(): void {
-		client.extract().then(function fill(snapshot: Record<string, unknown>): void {
-			for (const [key, data] of Object.entries(snapshot)) {
-				if (!entries.has(key))
-					entries.set(key, { key, data, updatedAt: Date.now(), writes: 0, optimistic: undefined });
-			}
-
-			invalidateView();
-		}, noop);
-	}
-
-	/**
-	 * Creates a toolbar button.
+	 * Whether any of the texts contains the filter.
 	 *
-	 * @param label - The visible label
-	 * @param action - What it does
-	 * @param pressed - Toggle state, for toggle buttons
-	 * @returns The button
+	 * @param texts - The searchable texts
+	 * @returns `true` when there is no filter or a text contains it
 	 */
-	function button(label: string, action: () => void, pressed?: boolean): HTMLElement {
-		const element = h(
-			"button",
-			{ class: "tool", type: "button", "aria-pressed": pressed === undefined ? undefined : String(pressed) },
-			label,
+	function matches(...texts: string[]): boolean {
+		const needle = (filter as HTMLInputElement).value.trim().toLowerCase();
+
+		return (
+			!needle ||
+			texts.some(function contains(text: string): boolean {
+				return text.toLowerCase().includes(needle);
+			})
 		);
-
-		element.addEventListener("click", action);
-
-		return element;
 	}
 
 	/**
-	 * Renders the launcher.
+	 * Creates a list row selecting an item (clicking a selected row closes its detail).
 	 *
-	 * @returns The launcher button
-	 */
-	function renderLauncher(): HTMLElement {
-		let pending = 0;
-		let failed = 0;
-
-		for (const record of operations.values()) {
-			if (record.status === "pending" || record.status === "streaming") pending++;
-			if (record.status === "error") failed++;
-		}
-
-		const meter = h("span", { class: "meter", "aria-hidden": "true" });
-
-		for (let bar = 0; bar < 3; bar++) meter.append(h("i", { class: pending > bar ? "on" : undefined }));
-
-		const launcher = h(
-			"button",
-			{
-				class: "launcher",
-				type: "button",
-				"aria-expanded": String(isOpen),
-				"aria-label": `lumenql devtools: ${pending} in flight, ${failed} failed`,
-			},
-			meter,
-			"lumenql",
-			h("span", { class: "count" }, `${operations.size} ops`),
-			failed ? h("span", { class: "count err" }, `${failed} failed`) : undefined,
-		);
-
-		launcher.addEventListener("click", function toggle(): void {
-			if (isOpen) handle.close();
-			else handle.open();
-		});
-
-		return launcher;
-	}
-
-	/**
-	 * Renders a list row.
-	 *
-	 * @param id - The row's selection id
-	 * @param children - The row's cells
+	 * @param id - The item's selection id
+	 * @param children - The row's content
 	 * @returns The row
 	 */
 	function row(id: string | number, ...children: Node[]): HTMLElement {
-		const element = h("button", { class: "row", type: "button", "aria-selected": String(selected === id) }, ...children);
+		const element = h("button", { type: "button", class: "row", "aria-selected": String(selected === id) }, ...children);
 
 		element.addEventListener("click", function select(): void {
-			selected = id;
-			invalidateView();
+			selected = selected === id ? undefined : id;
+			update();
 		});
 
 		return element;
 	}
 
 	/**
-	 * Renders the operations timeline and the selected operation.
+	 * Creates an empty state.
 	 *
-	 * @returns The list and the detail pane
+	 * @param title - What is missing
+	 * @param hint - How it appears
+	 * @returns The element
 	 */
-	function renderOperations(): [HTMLElement, HTMLElement] {
-		const list = h("div", { class: "list", role: "list" });
-		const records = [...operations.values()].reverse();
-		const now = Date.now();
-		const first = records.at(-1)?.startedAt ?? now;
-		const span = Math.max(now - first, 1);
-
-		if (records.length === 0) {
-			list.append(
-				h(
-					"p",
-					{ class: "empty" },
-					"Operations appear here as the app runs ",
-					h("code", {}, "gql"),
-					", live queries and subscriptions.",
-				),
-			);
-		}
-
-		for (const record of records) {
-			const duration = (record.endedAt ?? now) - record.startedAt;
-			const bar = h("i", {
-				class: record.status,
-				style: `left:${((record.startedAt - first) / span) * 100}%;width:${(Math.max(duration, 1) / span) * 100}%`,
-			});
-
-			list.append(
-				row(
-					record.id,
-					h("span", { class: `op ${record.type}`, title: record.type }, record.type.charAt(0).toUpperCase()),
-					h(
-						"span",
-						{ class: "name" },
-						h("strong", {}, record.name),
-						h("small", {}, describeKey(record.key).label),
-					),
-					h(
-						"span",
-						{ class: `chip ${record.status === "ok" ? record.source : record.status}` },
-						record.status === "ok" ? record.source : record.status,
-					),
-					h("span", { class: "time" }, formatDuration(duration), h("span", { class: "wf" }, bar)),
-				),
-			);
-		}
-
-		const record = typeof selected === "number" ? operations.get(selected) : undefined;
-		const detail = h("div", { class: "detail" });
-
-		if (!record) {
-			detail.append(h("p", { class: "empty" }, "Select an operation to see its variables, result and timing."));
-			return [list, detail];
-		}
-
-		detail.append(
-			h("h3", {}, `${record.type} ${record.name}`),
-			h(
-				"dl",
-				{},
-				h("dt", {}, "Status"),
-				h("dd", {}, record.status === "ok" ? `ok · ${record.source}` : record.status),
-				h("dt", {}, "Policy"),
-				h("dd", {}, record.fetchPolicy),
-				h("dt", {}, "Duration"),
-				h("dd", {}, formatDuration((record.endedAt ?? Date.now()) - record.startedAt)),
-				h("dt", {}, "Retries"),
-				h("dd", {}, String(record.retries)),
-				h("dt", {}, "Results"),
-				h("dd", {}, String(record.results)),
-				h("dt", {}, "Key"),
-				h("dd", {}, describeKey(record.key).label),
-			),
-			h("h4", {}, "Variables"),
-			json(record.variables ?? null),
-		);
-
-		if (record.error !== undefined) {
-			const errors = (record.error as { errors?: ReadonlyArray<{ message: string }> }).errors ?? [];
-
-			detail.append(h("h4", {}, "Error"), h("div", { class: "err-box" }, errorMessage(record.error)));
-
-			if (errors.length) detail.append(json(errors));
-		}
-
-		if (record.data !== undefined) {
-			detail.append(h("h4", {}, record.stream ? "Latest result" : "Result"), json(record.data));
-		}
-
-		return [list, detail];
+	function empty(title: string, hint: string): HTMLElement {
+		return h("div", { class: "empty" }, h("b", {}, title), h("span", {}, hint));
 	}
 
 	/**
-	 * Renders the cache entries and the selected entry.
+	 * Creates a button copying a value as JSON.
 	 *
-	 * @returns The list and the detail pane
+	 * @param label - The label
+	 * @param value - The value
+	 * @returns The button
 	 */
-	function renderCache(): [HTMLElement, HTMLElement] {
-		const list = h("div", { class: "list", role: "list" });
-		const records = [...entries.values()].sort(function newestFirst(a: CacheRecord, b: CacheRecord): number {
-			return b.updatedAt - a.updatedAt;
+	function copy(label: string, value: unknown): HTMLElement {
+		return button(label, "action", function copyValue(event: MouseEvent): void {
+			const target = event.currentTarget as HTMLElement;
+
+			navigator.clipboard?.writeText(stringify(value)).then(function copied(): void {
+				target.textContent = "Copied";
+				setTimeout(function restore(): void {
+					target.textContent = label;
+				}, 1_200);
+			}, noop);
 		});
+	}
 
-		if (records.length === 0) {
-			list.append(h("p", { class: "empty" }, "Nothing cached yet. Entries appear when results land in the cache."));
-		}
+	/**
+	 * Fills the list with the operations, newest first.
+	 */
+	function listOperations(): void {
+		const now = Date.now();
+		const rows: Node[] = [];
 
-		for (const record of records) {
-			const { label, detail } = describeKey(record.key);
+		for (const record of [...operations.values()].reverse()) {
+			const where = describeKey(record.key).label;
 
-			list.append(
+			if (!matches(record.name, record.type, where)) continue;
+
+			rows.push(
 				row(
-					record.key,
-					h("span", { class: "op" }, "K"),
-					h("span", { class: "name" }, h("strong", {}, label), h("small", {}, detail || " ")),
+					record.id,
+					h("span", { class: `dot ${record.status}` }),
+					h("span", { class: "what" }, h("b", {}, record.name), h("span", {}, `${record.type} · ${where}`)),
 					h(
 						"span",
-						{ class: `chip ${record.optimistic ? "pending" : ""}` },
-						record.optimistic ?? `${record.writes} writes`,
+						{ class: "meta" },
+						h("span", { class: `tag ${record.status}` }, status(record)),
+						h("span", { class: "ms" }, duration((record.endedAt ?? now) - record.startedAt)),
 					),
-					h("span", { class: "time" }, formatClock(record.updatedAt).slice(3, 8)),
 				),
 			);
 		}
 
-		const record = typeof selected === "string" ? entries.get(selected) : undefined;
-		const pane = h("div", { class: "detail" });
+		list.replaceChildren(
+			...(rows.length
+				? rows
+				: [
+						operations.size
+							? empty("No match", "Nothing matches the filter.")
+							: empty("No operations yet", "Queries, mutations and subscriptions show up here as they run."),
+					]),
+		);
+	}
 
-		if (!record) {
-			pane.append(h("p", { class: "empty" }, "Select an entry to see its data, or invalidate it."));
-			return [list, pane];
+	/**
+	 * Shows an operation.
+	 *
+	 * @param record - The operation
+	 */
+	function showOperation(record: OperationRecord): void {
+		const retries = record.retries ? `${record.retries} ${record.retries === 1 ? "retry" : "retries"}` : "";
+		const facts = [record.type, status(record), duration((record.endedAt ?? Date.now()) - record.startedAt), retries];
+		const actions = h("div", { class: "actions" });
+
+		if (record.type === "query" && !record.stream) {
+			actions.append(
+				button("Run again", "action", function rerun(): void {
+					client
+						.gql({ query: record.query, variables: record.variables as object, fetchPolicy: "network-only" })
+						.catch(noop);
+				}),
+			);
 		}
 
-		const { label, detail, prefix } = describeKey(record.key);
+		if (record.data !== undefined) actions.append(copy("Copy result", record.data));
+		if (record.variables !== undefined) actions.append(copy("Copy variables", record.variables));
+
+		detail.replaceChildren(
+			button("‹ Back", "ghost back", deselect),
+			h("h2", {}, record.name),
+			h("p", { class: "line" }, [...facts, record.fetchPolicy, clock(record.startedAt)].filter(Boolean).join(" · ")),
+			actions,
+			...(record.error === undefined
+				? []
+				: [h("h3", {}, "Error"), h("div", { class: "problem" }, message(record.error))]),
+			...(record.data === undefined
+				? []
+				: [h("h3", {}, record.stream ? "Latest result" : "Result"), json(record.data)]),
+			...(record.variables === undefined ? [] : [h("h3", {}, "Variables"), json(record.variables)]),
+		);
+	}
+
+	/**
+	 * Fills the list with the cache entries, the most recently written first; live ones are marked.
+	 */
+	function listCache(): void {
+		const rows: Node[] = [];
+
+		for (const record of [...entries.values()].reverse()) {
+			const { label, detail: info } = describeKey(record.key);
+			const live = watchers.get(record.key) ?? 0;
+
+			if (!matches(label, info)) continue;
+
+			rows.push(
+				row(
+					record.key,
+					h("span", { class: `dot ${live ? "live" : ""}` }),
+					h("span", { class: "what" }, h("b", {}, label), h("span", {}, info || "no variables")),
+					h(
+						"span",
+						{ class: "meta" },
+						h("span", {}, live ? "live" : ""),
+						h("span", { class: "ms" }, clock(record.updatedAt)),
+					),
+				),
+			);
+		}
+
+		list.replaceChildren(
+			...(rows.length
+				? rows
+				: [
+						entries.size
+							? empty("No match", "Nothing matches the filter.")
+							: empty("Nothing cached", "Results appear here when they land in the cache."),
+					]),
+		);
+	}
+
+	/**
+	 * Shows a cache entry.
+	 *
+	 * @param record - The entry
+	 */
+	function showEntry(record: CacheRecord): void {
+		const { label, detail: info, prefix } = describeKey(record.key);
+		const live = watchers.get(record.key) ?? 0;
 		const actions = h("div", { class: "actions" });
+		const watching = live ? `${live} live ${live === 1 ? "query" : "queries"}` : "not watched";
 
 		if (prefix) {
 			actions.append(
-				button("Invalidate entry key", function invalidate(): void {
+				button("Invalidate", "action", function invalidate(): void {
 					client.invalidate(prefix).catch(noop);
 				}),
 			);
 		}
 
-		actions.append(button("Reload from cache", loadCache));
-		pane.append(
-			h("h3", {}, label),
-			h(
-				"dl",
-				{},
-				h("dt", {}, "Operation"),
-				h("dd", {}, detail || "—"),
-				h("dt", {}, "Updated"),
-				h("dd", {}, formatClock(record.updatedAt)),
-			),
+		actions.append(copy("Copy data", record.data));
+		detail.replaceChildren(
+			button("‹ Back", "ghost back", deselect),
+			h("h2", {}, label),
+			h("p", { class: "line" }, [info, watching, `updated ${clock(record.updatedAt)}`].filter(Boolean).join(" · ")),
 			actions,
-			h("h4", {}, "Data"),
+			h("h3", {}, "Data"),
 			json(record.data),
 		);
-
-		return [list, pane];
 	}
 
 	/**
-	 * Renders the live queries.
-	 *
-	 * @returns The list and the detail pane
+	 * Fills the list with the event log, newest first.
 	 */
-	function renderLive(): [HTMLElement, HTMLElement] {
-		const list = h("div", { class: "list", role: "list" });
+	function listLog(): void {
+		const lines: Node[] = [];
 
-		if (live.size === 0) {
-			list.append(
-				h(
-					"p",
-					{ class: "empty" },
-					"No live query is mounted. ",
-					h("code", {}, "watch()"),
-					" and the hooks show up here.",
-				),
-			);
+		for (const line of [...log].reverse()) {
+			if (!matches(line.type, line.text)) continue;
+
+			lines.push(h("p", {}, h("time", {}, clock(line.at)), h("i", {}, line.type), h("span", {}, line.text)));
 		}
 
-		for (const [key, watchers] of live) {
-			const { label, detail } = describeKey(key);
-
-			list.append(
-				row(
-					`live:${key}`,
-					h("span", { class: "op subscription" }, "L"),
-					h("span", { class: "name" }, h("strong", {}, label), h("small", {}, detail || " ")),
-					h("span", { class: "chip ok" }, `${watchers} watching`),
-					h("span", { class: "time" }, ""),
-				),
-			);
-		}
-
-		const key = typeof selected === "string" && selected.startsWith("live:") ? selected.slice(5) : undefined;
-		const pane = h("div", { class: "detail" });
-		const record = key === undefined ? undefined : entries.get(key);
-
-		if (key === undefined) pane.append(h("p", { class: "empty" }, "Select a live query to see the data it shows."));
-		else pane.append(h("h3", {}, describeKey(key).label), h("h4", {}, "Cached data"), json(record?.data ?? null));
-
-		return [list, pane];
+		list.replaceChildren(...(lines.length ? lines : [empty("Quiet so far", "Every client event is logged here.")]));
 	}
 
 	/**
-	 * Renders the raw event log.
-	 *
-	 * @returns The log, spanning both columns
+	 * Clears the selection.
 	 */
-	function renderEvents(): HTMLElement {
-		const list = h("div", { class: "list log", style: "grid-column:1/-1;border-right:0" });
-
-		if (events.length === 0) list.append(h("p", { class: "empty" }, "Every client event is logged here."));
-
-		for (const event of [...events].reverse()) {
-			list.append(
-				h("div", {}, h("time", {}, formatClock(event.at)), h("b", {}, event.type), h("span", {}, event.summary)),
-			);
-		}
-
-		return list;
+	function deselect(): void {
+		selected = undefined;
+		update();
 	}
 
 	/**
-	 * Renders the panel, replacing the previous render.
+	 * Renders the launcher, the tabs, the list and (when it changed) the detail.
 	 */
 	function render(): void {
 		frame = undefined;
+		panel.hidden = !isOpen;
 
-		const scroll = root.querySelector(".list")?.scrollTop ?? 0;
-		const children: Node[] = [];
+		let pending = 0;
 
-		if (isOpen) {
-			const tabs = h("div", { class: "tabs", role: "tablist" });
-			const counts: Record<Tab, number> = {
-				operations: operations.size,
-				cache: entries.size,
-				live: live.size,
-				events: events.length,
-			};
+		for (const record of operations.values()) if (record.status === "pending") pending++;
 
-			for (const name of ["operations", "cache", "live", "events"] as Tab[]) {
+		launcher.replaceChildren(
+			h("span", { class: `dot ${pending ? "pending" : failures ? "error" : "ok"}` }),
+			h("span", { class: "word" }, h("b", {}, "lumen"), "ql"),
+			failures
+				? h("span", { class: "tally bad" }, `${failures} failed`)
+				: h("span", { class: "tally" }, pending ? `${pending} running` : String(operations.size)),
+		);
+		launcher.setAttribute("aria-expanded", String(isOpen));
+		launcher.setAttribute("aria-label", `${isOpen ? "Close" : "Open"} lumenql devtools`);
+		launcher.title = shortcutLabel ? `lumenql devtools (${shortcutLabel})` : "lumenql devtools";
+
+		if (!isOpen) return;
+
+		const counts: Record<Tab, number | undefined> = { operations: operations.size, cache: entries.size, log: undefined };
+
+		tabs.replaceChildren(
+			...(["operations", "cache", "log"] as Tab[]).map(function tabButton(name: Tab): HTMLElement {
+				const label = name.charAt(0).toUpperCase() + name.slice(1);
 				const element = h(
 					"button",
-					{ class: "tab", type: "button", role: "tab", "aria-selected": String(tab === name) },
-					name === "live" ? "Live queries" : name.charAt(0).toUpperCase() + name.slice(1),
-					h("span", {}, String(counts[name])),
+					{ type: "button", class: "tab", role: "tab", "aria-selected": String(tab === name) },
+					label,
 				);
 
+				if (counts[name] !== undefined) element.append(h("small", {}, String(counts[name])));
 				element.addEventListener("click", function choose(): void {
 					tab = name;
 					selected = undefined;
 					if (name === "cache") loadCache();
-					invalidateView();
+					remember({ open: true, tab });
+					update();
 				});
-				tabs.append(element);
-			}
 
-			const body = h("div", { class: "body" });
+				return element;
+			}),
+		);
 
-			if (tab === "events") body.append(renderEvents());
-			else
-				body.append(...(tab === "operations" ? renderOperations() : tab === "cache" ? renderCache() : renderLive()));
+		const record = tab === "operations" && typeof selected === "number" ? operations.get(selected) : undefined;
+		const entry = tab === "cache" && typeof selected === "string" ? entries.get(selected) : undefined;
 
-			children.push(
-				h(
-					"div",
-					{ class: "panel", role: "dialog", "aria-label": "lumenql devtools" },
-					h(
-						"div",
-						{ class: "bar" },
-						h("span", { class: "mark" }, h("b", {}, "lumen"), "ql"),
-						tabs,
-						button(
-							paused ? "Resume" : "Pause",
-							function togglePause(): void {
-								paused = !paused;
-								invalidateView();
-							},
-							paused,
-						),
-						button("Clear", function clear(): void {
-							operations.clear();
-							events.length = 0;
-							selected = undefined;
-							invalidateView();
-						}),
-					),
-					body,
-				),
-			);
+		list.classList.toggle("log", tab === "log");
+
+		if (tab === "operations") listOperations();
+		else if (tab === "cache") listCache();
+		else listLog();
+
+		body.classList.toggle("split", record !== undefined || entry !== undefined);
+		detail.hidden = record === undefined && entry === undefined;
+
+		// The detail is rebuilt only when what it shows changed: selecting text or scrolling in it survives bursts.
+		const showing = record
+			? `operation:${record.id}:${record.version}`
+			: entry
+				? `entry:${entry.key}:${entry.version}:${watchers.get(entry.key) ?? 0}`
+				: "";
+
+		if (showing !== shown) {
+			shown = showing;
+
+			if (record) showOperation(record);
+			else if (entry) showEntry(entry);
+			else detail.replaceChildren();
 		}
-
-		children.push(renderLauncher());
-		root.replaceChildren(root.querySelector("style")!, ...children);
-
-		const list = root.querySelector(".list");
-
-		if (list) list.scrollTop = scroll;
 	}
 
-	const handle: DevtoolsHandle = {
-		open(): void {
-			isOpen = true;
-			loadCache();
-			invalidateView();
-		},
-		close(): void {
-			isOpen = false;
-			invalidateView();
-		},
-		dispose(): void {
-			for (const stop of stops) stop();
-			if (frame !== undefined) cancelAnimationFrame(frame);
-			host.remove();
-		},
-	};
+	/**
+	 * Toggles the panel with the shortcut.
+	 *
+	 * @param event - The keyboard event
+	 */
+	function onKey(event: KeyboardEvent): void {
+		if (!shortcut?.(event)) return;
+
+		event.preventDefault();
+		if (isOpen) close();
+		else open();
+	}
 
 	root.addEventListener("keydown", function closeOnEscape(event: Event): void {
-		if ((event as KeyboardEvent).key === "Escape") handle.close();
+		if ((event as KeyboardEvent).key === "Escape") close();
 	});
+	window.addEventListener("keydown", onKey);
 
 	if (isOpen) loadCache();
 	render();
 
-	return handle;
+	return {
+		open,
+		close,
+		dispose(): void {
+			for (const stop of stops) stop();
+			window.removeEventListener("keydown", onKey);
+			if (frame !== undefined) cancelAnimationFrame(frame);
+			frame = undefined;
+			host.remove();
+		},
+	};
 }
 
 /**
- * The devtools as a plugin: mounts the panel when the client is created and removes it on `client.dispose()`.
+ * A short label for an operation's state: where its result came from, or that it is running or failed.
+ *
+ * @param record - The operation
+ * @returns The label
+ */
+function status(record: OperationRecord): string {
+	if (record.status === "error") return "failed";
+	if (record.status === "pending") return record.stream ? "streaming" : "pending";
+
+	return SOURCES[record.source] ?? record.source;
+}
+
+/**
+ * The devtools as a plugin: one line, mounted with the client and removed by `client.dispose()`. In production
+ * builds (`NODE_ENV=production`) it does nothing unless `force` is set; import it conditionally to also leave its
+ * code out of the bundle.
  *
  * @example
- * const client = new Client({ url, plugins: import.meta.env.DEV ? [devtools()] : [] });
+ * const client = new Client({ url, plugins: [devtools()] });
  *
  * @param options - Panel options
  * @returns The plugin
  */
-export function devtools(options?: DevtoolsOptions): Plugin {
+export function devtools(options: DevtoolsOptions = {}): Plugin {
 	return {
 		name: "devtools",
-		setup(client: Client): () => void {
+		setup(client: Client): (() => void) | undefined {
+			if (isProduction() && !options.force) return undefined;
+
 			return mountDevtools(client, options).dispose;
 		},
 	};

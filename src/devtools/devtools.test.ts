@@ -209,7 +209,156 @@ describe("devtools", function () {
 		await client.gql({ query: TODOS }).catch(function ignore() {});
 		await frame();
 
-		expect(panel().querySelector(".launcher")?.textContent).toContain("1 failed");
+		const launcher = panel().querySelector(".launcher")!;
+
+		expect(launcher.classList.contains("bad")).toBe(true);
+		expect(launcher.getAttribute("aria-label")).toContain("1 failed");
+	});
+
+	it("keeps the launcher's nodes while an operation runs, and holds the activity briefly", async function () {
+		let answer!: () => void;
+		const fetchMock = vi.fn(function respond() {
+			return new Promise<Response>(function later(resolve) {
+				answer = function reply() {
+					resolve(Response.json({ data: { todos: [] } }));
+				};
+			});
+		});
+		const client = new Client({ url: URL, fetch: fetchMock as unknown as typeof fetch });
+
+		mount(client);
+		await frame();
+
+		const launcher = panel().querySelector(".launcher")!;
+		const nodes = [...launcher.childNodes];
+		const request = client.gql({ query: TODOS });
+
+		await frame();
+		expect(launcher.classList.contains("busy")).toBe(true);
+		expect(launcher.getAttribute("aria-label")).toContain("1 running");
+		expect(launcher.querySelector(".tally")?.textContent).toBe("1");
+
+		answer();
+		await request;
+		await frame();
+		// Still showing activity (no flicker for fast operations), with the very same nodes (no layout shift).
+		expect(launcher.classList.contains("busy")).toBe(true);
+		expect([...launcher.childNodes]).toEqual(nodes);
+
+		await new Promise(function wait(resolve) {
+			setTimeout(resolve, 650);
+		});
+		await frame();
+		expect(launcher.classList.contains("busy")).toBe(false);
+		expect(launcher.getAttribute("aria-label")).not.toContain("running");
+	});
+
+	it("keeps focus on a row while new operations arrive", async function () {
+		const { client } = createClient();
+
+		mount(client, { open: true });
+		await client.gql({ query: TODOS });
+		await frame();
+
+		const first = panel().querySelector<HTMLButtonElement>(".row")!;
+
+		first.focus();
+		await client.gql({ query: TODOS, variables: { page: 2 } });
+		await frame();
+
+		expect(rows()).toHaveLength(2);
+		expect(panel().activeElement).toBe(first);
+		expect(panel().querySelectorAll(".row")[1]).toBe(first);
+	});
+
+	it("follows a rerun and shows the operation's document", async function () {
+		const { client } = createClient();
+
+		mount(client, { open: true });
+		await client.gql({ query: TODOS, key: ["todos"] });
+		await frame();
+		panel().querySelector<HTMLButtonElement>(".row")!.click();
+		await frame();
+		expect(panel().querySelector(".detail")?.textContent).toContain(TODOS);
+
+		click("Run again");
+		await frame();
+		await frame();
+
+		const selected = panel().querySelector('.row[aria-selected="true"]');
+
+		expect(rows()).toHaveLength(2);
+		expect(selected).toBe(panel().querySelector(".row"));
+		expect(panel().querySelector(".detail .line")?.textContent).toContain("network-only");
+	});
+
+	it("matches the shortcut by physical key, whatever character the layout produces", async function () {
+		const { client } = createClient();
+
+		mount(client, { shortcut: "alt+shift+l" });
+		window.dispatchEvent(new KeyboardEvent("keydown", { key: "Ò", code: "KeyL", altKey: true, shiftKey: true }));
+		await frame();
+		expect(panel().querySelector<HTMLElement>(".panel")!.hidden).toBe(false);
+	});
+
+	it("copies without the Clipboard API, and says when copying fails", async function () {
+		const { client } = createClient();
+		const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+		const execCommand = vi.fn(function copy() {
+			return true;
+		});
+
+		Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+		Object.defineProperty(document, "execCommand", { value: execCommand, configurable: true });
+
+		try {
+			mount(client, { open: true });
+			await client.gql({ query: TODOS });
+			await frame();
+			panel().querySelector<HTMLButtonElement>(".row")!.click();
+			await frame();
+
+			click("Copy result");
+			await frame();
+			expect(execCommand).toHaveBeenCalledWith("copy");
+			expect(panel().querySelector(".detail")?.textContent).toContain("Copied");
+			expect(panel().querySelector("textarea")).toBeNull();
+
+			execCommand.mockReturnValue(false);
+			click("Copy query");
+			await frame();
+			expect(panel().querySelector(".detail")?.textContent).toContain("Copy failed");
+		} finally {
+			if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+			else Reflect.deleteProperty(navigator, "clipboard");
+			Reflect.deleteProperty(document, "execCommand");
+		}
+	});
+
+	it("invalidates an entry through the client that cached it", async function () {
+		const { client } = createClient();
+		const { client: other } = createClient();
+		const invalidate = vi.spyOn(other, "invalidate");
+		const handle = mount(client, { open: true });
+
+		handle.attach(other);
+		await other.gql({ query: TODOS, key: ["other"] });
+		await frame();
+		click("Cache");
+		await frame();
+		panel().querySelector<HTMLButtonElement>(".row")!.click();
+		await frame();
+		click("Invalidate");
+
+		expect(invalidate).toHaveBeenCalledWith(["other"]);
+	});
+
+	it("renders under its own element, so page styles never reach it", function () {
+		const { client } = createClient();
+
+		mount(client);
+
+		expect(document.querySelector("[data-lumenql-devtools]")?.localName).toBe("lumenql-devtools");
 	});
 
 	it("is a one-line plugin, removed on dispose(), and off in production builds unless forced", async function () {
@@ -227,5 +376,18 @@ describe("devtools", function () {
 		expect(document.querySelector("[data-lumenql-devtools]")).toBeNull();
 
 		new Client({ url: URL, plugins: [devtools({ force: true })] }).dispose();
+	});
+
+	it("shares one panel across clients (hot reloads create new ones), removed with the last", function () {
+		const first = new Client({ url: URL, plugins: [devtools()] });
+		const second = new Client({ url: URL, plugins: [devtools()] });
+
+		expect(document.querySelectorAll("[data-lumenql-devtools]")).toHaveLength(1);
+
+		first.dispose();
+		expect(document.querySelectorAll("[data-lumenql-devtools]")).toHaveLength(1);
+
+		second.dispose();
+		expect(document.querySelector("[data-lumenql-devtools]")).toBeNull();
 	});
 });

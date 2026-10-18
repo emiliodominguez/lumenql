@@ -158,7 +158,10 @@ export interface ClientConfiguration {
 	middleware?: ReadonlyArray<Middleware> | undefined;
 	/** HTTP method for queries. `GET` enables CDN/browser caching. Mutations always use `POST`. Defaults to `POST`. */
 	method?: "GET" | "POST" | undefined;
-	/** Automatic Persisted Queries: send a SHA-256 hash first and the full document only when the server asks. */
+	/**
+	 * Automatic Persisted Queries: send a SHA-256 hash first and the full document only when the server asks. Read by
+	 * the `lumenql` entry only; with `lumenql/core`, add the `persistedQueries()` plugin.
+	 */
 	persistedQueries?: boolean | PersistedQueriesOptions | undefined;
 	/**
 	 * Called once for every failed operation (after retries), e.g. to report errors or sign out on 401.

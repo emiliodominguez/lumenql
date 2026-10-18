@@ -18,6 +18,7 @@ export function logger(log: (line: string) => void = console.debug): Plugin {
 			// Start time and retries per operation id, for the final "ok in Nms after N retries" line.
 			const starts = new Map<number | undefined, number>();
 			const retries = new Map<number | undefined, number>();
+			const refreshes = new Set<number>();
 
 			/**
 			 * Writes a line about an operation.
@@ -30,8 +31,10 @@ export function logger(log: (line: string) => void = console.debug): Plugin {
 			}
 
 			const stops = [
-				client.on("operation", function started({ id, context }): void {
+				client.on("operation", function started({ id, context, fetchPolicy }): void {
 					starts.set(id, Date.now());
+					// A cache hit is followed by a background refresh: its timing must survive the hit.
+					if (fetchPolicy === "cache-and-network") refreshes.add(id);
 
 					if (context.stream) write(context, "streaming");
 				}),
@@ -43,8 +46,10 @@ export function logger(log: (line: string) => void = console.debug): Plugin {
 					const retried = retries.get(id) ?? 0;
 					const duration = Date.now() - (starts.get(id) ?? Date.now());
 
-					// A stream keeps its start time until it ends.
+					// A stream keeps its start time until it ends, and a cache hit until its background refresh does.
+					if (source === "cache" && refreshes.delete(id)) return write(context, "cache hit");
 					if (source !== "stream") starts.delete(id);
+					refreshes.delete(id);
 					retries.delete(id);
 
 					if (source === "cache") write(context, "cache hit");
@@ -54,6 +59,7 @@ export function logger(log: (line: string) => void = console.debug): Plugin {
 				}),
 				client.on("error", function failed({ id }): void {
 					starts.delete(id);
+					refreshes.delete(id);
 					retries.delete(id);
 				}),
 				client.on("done", function ended({ id }): void {

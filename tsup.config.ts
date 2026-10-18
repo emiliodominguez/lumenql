@@ -1,4 +1,5 @@
 import { defineConfig } from "tsup";
+import { cssText } from "./scripts/css-text.mjs";
 
 export default defineConfig({
 	entry: {
@@ -24,4 +25,5 @@ export default defineConfig({
 	clean: true,
 	treeshake: true,
 	external: ["react", "vue", "solid-js"],
+	esbuildPlugins: [cssText],
 });

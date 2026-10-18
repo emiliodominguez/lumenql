@@ -306,10 +306,17 @@ export class Client {
 	}
 
 	/**
-	 * Runs the teardown of every plugin. The client stays usable; plugins set up nothing more.
+	 * Runs the teardown of every plugin. The client stays usable; plugins set up nothing more. A failing teardown is
+	 * reported and never keeps the others from running.
 	 */
 	dispose(): void {
-		for (const teardown of this.#teardowns.splice(0)) teardown();
+		for (const teardown of this.#teardowns.splice(0)) {
+			try {
+				teardown();
+			} catch (error) {
+				console.error("[lumenql] A plugin teardown threw:", error);
+			}
+		}
 	}
 
 	/**
@@ -759,6 +766,7 @@ export class Client {
 						fetchPolicy,
 						invalidates: undefined,
 						optimistic: undefined,
+						refetchQueries: undefined,
 					});
 					const cache = client.#configuration.cache;
 
@@ -846,6 +854,7 @@ export class Client {
 						fetchPolicy: "no-cache",
 						invalidates: undefined,
 						optimistic: undefined,
+						refetchQueries: undefined,
 					});
 				},
 				real(visible: TData | undefined): TData | undefined {

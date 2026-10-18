@@ -78,7 +78,8 @@ const IDLE: QueryState<never> = Object.freeze({ data: undefined, error: undefine
  * @returns The store and its setter
  */
 function createStore<T>(initial: T, start?: (set: (value: T) => void) => () => void) {
-	const runs = new Set<(value: T) => void>();
+	// One entry per subscription (the same function may subscribe twice), as in Svelte's own stores.
+	const runs = new Set<{ run: (value: T) => void }>();
 	let value = initial;
 	let stop: (() => void) | undefined;
 
@@ -89,7 +90,7 @@ function createStore<T>(initial: T, start?: (set: (value: T) => void) => () => v
 	 */
 	function set(next: T): void {
 		value = next;
-		for (const run of [...runs]) run(value);
+		for (const subscriber of [...runs]) subscriber.run(value);
 	}
 
 	return {
@@ -98,12 +99,14 @@ function createStore<T>(initial: T, start?: (set: (value: T) => void) => () => v
 			return value;
 		},
 		subscribe(run: (value: T) => void): () => void {
-			runs.add(run);
+			const subscriber = { run };
+
+			runs.add(subscriber);
 			run(value);
 			if (runs.size === 1 && start) stop = start(set);
 
 			return function unsubscribe(): void {
-				if (!runs.delete(run) || runs.size > 0) return;
+				if (!runs.delete(subscriber) || runs.size > 0) return;
 
 				stop?.();
 				stop = undefined;

@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.1.1 - 2026-10-18
+
+### Fixed
+
+- `watch()` no longer forwards `refetchQueries` to its fetches: a live query whose options named its own operation (or two naming each other) refetched forever, and `fetchMore()` pages were dropped by the refetch they triggered.
+- `client.dispose()` runs every plugin teardown even when one throws (reported with `console.error`); the others used to stay attached.
+- `debug` / `logger()` logs the real duration of a `cache-and-network` background refresh (it logged `0ms`).
+- Svelte stores open a single stream when the same function subscribes twice, and each subscription unsubscribes independently.
+- `PersistedQueriesOptions` is exported from `lumenql/persisted`.
+
+### Changed
+
+- Devtools polish:
+  - The launcher never changes size. A ring spins around its dot while operations run (shown for at least 600 ms, so fast operations register without flicker), the dot turns red after a failure, and the count is fixed-width.
+  - The panel updates in place instead of rebuilding: focus, hover, scroll and animations survive event bursts, and running durations tick live.
+  - Framework- and page-agnostic: the panel renders under its own `<lumenql-devtools>` element with `!important` host styles, so page CSS can't move or restyle it; the stylesheet ships minified.
+  - Every `devtools()` client shares one panel per page: hot reloads no longer stack panels.
+  - "Run again" selects the new run. The detail shows the operation's document and has "Copy query". Copying works on insecure origins (e.g. a dev server reached by LAN address) and says when it fails.
+  - "Invalidate" goes through the client that cached the entry, the cache list syncs every attached client, and the shortcut also matches by physical key (layouts, macOS `alt`).
+- Docs: the design doc, README and JSDoc now match the shipped API (plugin hooks, events, entries, which options need the `lumenql` entry, `mountDevtools` vs `force`).
+
 ## 2.1.0 - 2026-10-18
 
 ### Added

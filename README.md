@@ -32,10 +32,10 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 
 **Extensibility**
 
-- **Lean core, opt-in features.** `lumenql/core` is the bare client (~9.4 kB); uploads, persisted queries, `@defer`, SSE, scalars and entities are plugins you add one by one. The `lumenql` entry ships them all, configured by the options below.
+- **Lean core, opt-in features.** `lumenql/core` is the bare client (~9.4 kB); uploads, persisted queries, `@defer`, SSE, scalars and entities are plugins you add one by one. The `lumenql` entry preinstalls uploads, persisted queries, `@defer` and SSE, configured by the options below; `scalars()` and `entities()` are always opt-in.
 - **Plugins.** One small interface with hooks for payloads, headers, bodies, streamed responses and results. Write your own in a few lines.
 - **Events.** `client.on()` exposes operations, results, retries, cache writes, invalidations, optimistic layers and live queries for logging and telemetry. It costs nothing while nobody listens.
-- **Devtools.** An in-page inspector (`lumenql/devtools`) with an operations timeline, the cache, live queries and the event log.
+- **Devtools.** An in-page inspector (`lumenql/devtools`) with an operations timeline, the cache, live queries and the event log. Framework-agnostic and isolated from page styles.
 - **Entities.** The `entities()` plugin keeps an updated entity (`__typename` + `id`) consistent across every cached query, without a normalized cache.
 
 **DX**
@@ -48,7 +48,7 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 
 ## Contents
 
-[Install](#install) · [Quick start](#quick-start) · [Typed documents](#typed-documents) · [Caching](#caching) · [Live queries](#live-queries) · [React](#react) · [SSR](#ssr) · [Auth and headers](#auth-and-headers) · [Retries](#retries) · [Middleware](#middleware) · [GET and persisted queries](#get-requests-and-persisted-queries) · [File uploads](#file-uploads) · [@defer / @stream](#incremental-delivery-defer--stream) · [Subscriptions](#subscriptions-sse) · [WebSocket](#websocket-subscriptions) · [Abort and timeouts](#abort-and-timeouts) · [Errors](#error-handling) · [Plugins and the lean core](#plugins-and-the-lean-core) · [Events](#events) · [Devtools](#devtools) · [API](#api) · [Size](#size)
+[Install](#install) · [Quick start](#quick-start) · [Typed documents](#typed-documents) · [Caching](#caching) · [Live queries](#live-queries) · [React](#react) · [SSR](#ssr) · [Auth and headers](#auth-and-headers) · [Retries](#retries) · [Middleware](#middleware) · [GET and persisted queries](#get-requests-and-persisted-queries) · [File uploads](#file-uploads) · [@defer / @stream](#incremental-delivery-defer--stream) · [Subscriptions](#subscriptions-sse) · [WebSocket](#websocket-subscriptions) · [Abort and timeouts](#abort-and-timeouts) · [Errors](#error-handling) · [Error policies and defaults](#error-policies-defaults-and-refetching) · [Entities](#entities) · [Plugins and the lean core](#plugins-and-the-lean-core) · [Events](#events) · [Devtools](#devtools) · [API](#api) · [Size](#size)
 
 ## Install
 
@@ -618,16 +618,16 @@ import { sse } from "lumenql/sse";
 const client = new Client({ url, cache: new MemoryCache(), plugins: [persistedQueries(), sse()] });
 ```
 
-| Plugin                    | Entry                 | Adds                                              |
-| ------------------------- | --------------------- | ------------------------------------------------- |
-| `upload()`                | `lumenql/upload`      | File uploads (multipart request spec)             |
-| `persistedQueries(opts?)` | `lumenql/persisted`   | Automatic Persisted Queries and trusted documents |
-| `incremental()`           | `lumenql/incremental` | `@defer` / `@stream` over `multipart/mixed`       |
-| `sse()`                   | `lumenql/sse`         | Subscriptions and streams over Server-Sent Events |
-| `scalars(parsers)`        | `lumenql/scalars`     | Field parsers (dates, money)                      |
-| `entities(opts?)`         | `lumenql/entities`    | Entity propagation across cached results          |
-| `logger(log?)`            | `lumenql`             | `debug` logging from client events                |
-| `devtools(opts?)`         | `lumenql/devtools`    | The in-page inspector                             |
+| Plugin                    | Entry                     | Adds                                              |
+| ------------------------- | ------------------------- | ------------------------------------------------- |
+| `upload()`                | `lumenql/upload`          | File uploads (multipart request spec)             |
+| `persistedQueries(opts?)` | `lumenql/persisted`       | Automatic Persisted Queries and trusted documents |
+| `incremental()`           | `lumenql/incremental`     | `@defer` / `@stream` over `multipart/mixed`       |
+| `sse()`                   | `lumenql/sse`             | Subscriptions and streams over Server-Sent Events |
+| `scalars(parsers)`        | `lumenql/scalars`         | Field parsers (dates, money)                      |
+| `entities(opts?)`         | `lumenql/entities`        | Entity propagation across cached results          |
+| `logger(log?)`            | `lumenql`, `lumenql/core` | `debug` logging from client events                |
+| `devtools(opts?)`         | `lumenql/devtools`        | The in-page inspector                             |
 
 A plugin is an object with a `name` and any of these hooks. Plugins run in order; a second plugin with the same name is ignored, so passing your own `upload` plugin replaces the built-in one.
 
@@ -645,13 +645,19 @@ const tracing: Plugin = {
       span.end();
     }
   },
-  headers(headers, context) {}, // adjust default headers (Accept...)
-  encode(payload) {}, // return a body to replace JSON (multipart, protobuf...)
-  bypass(variables) {}, // true to skip the cache and dedupe
-  decode(response, signal) {}, // turn a streamed response into JSON payloads
-  merge(state, payload) {}, // merge streamed payloads (return true when handled)
-  result(data, context) {}, // transform network results before caching
-  setup(client) {}, // subscribe to events; return a teardown for client.dispose()
+  // Every other hook is optional too:
+  // headers(headers, context): adjust default headers (Accept...)
+  // encode(payload): return a body to replace JSON (multipart, protobuf...), or undefined
+  // bypass(variables): true to skip the cache and dedupe
+  // decode(response, signal): turn a streamed response into JSON payloads, or undefined
+  // merge(state, payload): merge a streamed payload, true when handled
+  // result(data, context): transform network results before caching
+  setup(client) {
+    // Subscribe to events; the returned teardown runs on client.dispose()
+    return client.on("error", function report({ error }) {
+      tracer.error(error);
+    });
+  },
 };
 ```
 
@@ -687,13 +693,15 @@ import { devtools } from "lumenql/devtools";
 const client = new Client({ url, plugins: [devtools()] });
 ```
 
-A small launcher appears in the corner. Click it, or press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>.
+A small launcher appears in the corner. Click it, or press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd>. It never changes size: a ring spins around its dot while operations run (held briefly, so fast ones register without flicker), the dot turns red after a failure, and the number counts operations.
 
-- **Operations:** every query, mutation and subscription, newest first. Each shows where its result came from (network, cache, deduped, stream) and how long it took. Click one to see its result, error and variables, run it again, or copy them.
+- **Operations:** every query, mutation and subscription, newest first. Each shows where its result came from (network, cache, deduped, stream) and how long it took (live while it runs). Click one to see its result, error, variables and document, run it again (the panel follows the new run), or copy them.
 - **Cache:** what's cached, with live queries marked. Invalidate an entry in one click.
 - **Log:** every client event.
 
-The filter box searches the current tab. The panel remembers whether it was open and which tab was showing. It follows the system color scheme, and it only listens to events, so the client behaves the same with or without it. In production builds (`NODE_ENV=production`) the plugin does nothing unless you pass `force: true`. Import it conditionally to keep it out of the bundle entirely. Options: `open`, `position`, `theme`, `shortcut` and `limit`. `mountDevtools(client, options)` does the same without a plugin.
+The filter box searches the current tab. The panel remembers whether it was open and which tab was showing, follows the system color scheme, and only listens to events, so the client behaves the same with or without it. It works with any framework (or none): it renders in a shadow root under its own `<lumenql-devtools>` element, so page styles can't reach it and its styles can't leak out, and it works under a strict CSP. Every client using `devtools()` shows in one panel, so hot reloads and `extend()` don't stack panels.
+
+In production builds (`NODE_ENV=production`) the plugin does nothing unless you pass `force: true`. Import it conditionally to keep it out of the bundle entirely. Options: `open`, `position`, `theme`, `shortcut`, `limit`, `container` and `force`. `mountDevtools(client, options)` mounts a panel without a plugin (always, so call it conditionally) and returns `open()`, `close()`, `attach(otherClient)` and `dispose()`.
 
 Try it in `examples/devtools-playground` (`node examples/devtools-playground/build.mjs`).
 
@@ -713,12 +721,12 @@ Try it in `examples/devtools-playground` (`node examples/devtools-playground/bui
 | `retry`                 | `number \| RetryOptions`                       | none               | Retry policy. See [Retries](#retries).                                                                                                                               |
 | `middleware`            | `Middleware[]`                                 | `[]`               | Request/response middleware.                                                                                                                                         |
 | `method`                | `"POST" \| "GET"`                              | `"POST"`           | HTTP method for queries.                                                                                                                                             |
-| `persistedQueries`      | `boolean \| { hash?, strict? }`                | `false`            | Automatic Persisted Queries.                                                                                                                                         |
+| `persistedQueries`      | `boolean \| { hash?, strict? }`                | `false`            | Automatic Persisted Queries (`lumenql` entry; with `lumenql/core`, add `persistedQueries()`).                                                                        |
 | `subscriptionTransport` | `SubscriptionTransport`                        | SSE over `fetch`   | Transport for `subscription` operations.                                                                                                                             |
 | `onError`               | `(error, context) => void`                     | none               | Called once per failed operation (after retries), e.g. to report errors or sign out on 401.                                                                          |
 | `plugins`               | `Plugin[]`                                     | `[]`               | Extensions. See [Plugins](#plugins-and-the-lean-core).                                                                                                               |
 | `defaultOptions`        | `{ query?, mutation?, watch? }`                | none               | Defaults per operation type: fetch and error policies, polling.                                                                                                      |
-| `debug`                 | `boolean`                                      | `false`            | Log operations, timings and cache hits.                                                                                                                              |
+| `debug`                 | `boolean`                                      | `false`            | Log operations, timings and cache hits (`lumenql` entry; with `lumenql/core`, add `logger()`).                                                                       |
 
 ### Methods
 
@@ -745,7 +753,7 @@ Try it in `examples/devtools-playground` (`node examples/devtools-playground/bui
 | `key`            | `(string \| number \| boolean \| null)[]` | Hierarchical cache key for grouping and invalidation.             |
 | `fetchPolicy`    | `FetchPolicy`                             | See [Caching](#caching).                                          |
 | `invalidates`    | `CacheKey[]`                              | Cache prefixes to invalidate after success.                       |
-| `refetchQueries` | `string[]`                                | Live queries to refetch by operation name after success.          |
+| `refetchQueries` | `string[]`                                | Live queries to refetch by operation name after success (`gql`).  |
 | `errorPolicy`    | `"none" \| "ignore" \| "all"`             | What GraphQL errors next to data mean. Defaults to `none`.        |
 | `optimistic`     | `OptimisticUpdate[]`                      | Cache updates applied immediately and rolled back on failure.     |
 | `headers`        | `HeadersLike`                             | Per-call headers. Calls with these are not deduplicated.          |
@@ -761,7 +769,7 @@ Try it in `examples/devtools-playground` (`node examples/devtools-playground/bui
 
 ## Size
 
-Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
+Sizes are minified + gzip, measured by `yarn size`. Budgets for the client, the plugins and the devtools are enforced by `yarn verify`:
 
 | Import                                               | Size       |
 | ---------------------------------------------------- | ---------- |
@@ -769,9 +777,9 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 | `Client` + `MemoryCache` from `lumenql/core`         | ~9.4 kB    |
 | Each plugin                                          | 0.3–1.7 kB |
 | `lumenql/react`                                      | ~1.8 kB    |
-| `lumenql/svelte` / `vue` / `solid`                   | 0.5–0.8 kB |
+| `lumenql/svelte` / `vue` / `solid`                   | 0.5–0.9 kB |
 | `lumenql/ws`                                         | ~1.8 kB    |
-| `lumenql/devtools` (development only)                | ~5.9 kB    |
+| `lumenql/devtools` (development only)                | ~7.4 kB    |
 
 ## Development
 

@@ -8,6 +8,7 @@ export default defineConfig({
 		persisted: "src/entries/persisted.ts",
 		incremental: "src/entries/incremental.ts",
 		sse: "src/entries/sse.ts",
+		scalars: "src/entries/scalars.ts",
 		react: "src/react/index.ts",
 		ws: "src/ws/index.ts",
 	},

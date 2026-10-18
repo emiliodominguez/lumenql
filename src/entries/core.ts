@@ -8,11 +8,14 @@ export { logger } from "../logger";
 export { optimistic } from "../optimistic";
 export { QueryRef, type QueryListener } from "../query-ref";
 export { isRetryable } from "../retry";
+export { scalars, type ScalarParser } from "../scalars";
 export type {
 	AuthTokenResolver,
 	Cache,
 	CacheKey,
 	CacheTarget,
+	DefaultOptions,
+	ErrorPolicy,
 	ClientConfiguration,
 	ClientEventListener,
 	ClientEvents,

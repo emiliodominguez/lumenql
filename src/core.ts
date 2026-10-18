@@ -8,6 +8,7 @@ import type {
 	ClientConfiguration,
 	ClientEventListener,
 	ClientEvents,
+	ErrorPolicy,
 	FetchPolicy,
 	GraphQLFormattedError,
 	GraphQLResponse,
@@ -51,7 +52,7 @@ type Payload = OperationPayload;
 /**
  * The subset of request options the transport layer needs.
  */
-type TransportOptions = Pick<RequestOptions<unknown, unknown>, "variables" | "operationName" | "headers">;
+type TransportOptions = Pick<RequestOptions<unknown, unknown>, "variables" | "operationName" | "headers" | "errorPolicy">;
 
 /**
  * State that must be shared by every client using the same cache.
@@ -368,10 +369,13 @@ export class Client {
 	async gql<TData = unknown, TVariables extends object = Record<string, unknown>>(
 		options: WithVariables<RequestOptions<TData, TVariables>, TVariables>,
 	): Promise<TData> {
-		const { cache } = this.#configuration;
+		const { cache, defaultOptions } = this.#configuration;
 		const query = String(options.query);
 		const operation = parseOperation(query, options.operationName);
 		const isQuery = operation.type === "query";
+
+		options = withDefaults(options, defaultOptions?.[operation.type === "mutation" ? "mutation" : "query"]);
+
 		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
 		// Some variables (files) have no stable identity in a cache key: never cache nor dedupe requests carrying them.
 		const bypass = this.#bypasses(options.variables);
@@ -635,7 +639,7 @@ export class Client {
 				const chunks = response.ok && response.body ? this.#decode(response, scope.signal) : undefined;
 
 				if (!chunks) {
-					const data = await this.#parseResponse<TData>(response, scope.signal);
+					const data = this.#transform(await this.#parseResponse<TData>(response, scope.signal), context);
 
 					this.#streamed(context, data);
 					yield data;
@@ -667,9 +671,11 @@ export class Client {
 
 				// A trailing `completed`/`hasNext: false` payload changes nothing: don't yield the same result twice.
 				if (data !== undefined && data !== last) {
+					const output = this.#transform(data as TData, context);
+
 					last = data;
-					this.#streamed(context, data);
-					yield data as TData;
+					this.#streamed(context, output);
+					yield output;
 				}
 			}
 
@@ -717,8 +723,11 @@ export class Client {
 		options: WithVariables<WatchOptions<TData, TVariables>, TVariables>,
 	): QueryRef<TData, TVariables> {
 		const client = this;
+		const { defaultOptions } = this.#configuration;
 		const query = String(options.query);
 		const cacheKey = createCacheKey(options.key ?? [], query, options.variables, options.operationName);
+
+		options = withDefaults(options, defaultOptions?.watch, defaultOptions?.query);
 		const peeksCache = readsCache(options.fetchPolicy ?? "cache-first");
 
 		return new QueryRef<TData, TVariables>(
@@ -805,6 +814,9 @@ export class Client {
 					return client.#invalidatedSince(cacheKey, epoch);
 				},
 				register(watcher: QueryWatcher<TData>): () => void {
+					// Named for `refetchQueries`.
+					watcher.name = parseOperation(query, options.operationName).name;
+
 					return client.#register(cacheKey, watcher as QueryWatcher<unknown>);
 				},
 				fetchMore(variables: Partial<TVariables> | undefined): Promise<TData> {
@@ -1034,15 +1046,24 @@ export class Client {
 	 * @param context - The operation metadata
 	 */
 	async #applyInvalidates(
-		options: Pick<RequestOptions<unknown, unknown>, "invalidates" | "signal">,
+		options: Pick<RequestOptions<unknown, unknown>, "invalidates" | "refetchQueries" | "signal">,
 		context: OperationContext,
 	): Promise<void> {
+		const names = options.refetchQueries;
+
 		for (const prefix of options.invalidates ?? []) {
 			try {
 				await this.invalidate(prefix);
 			} catch (error) {
 				this.#report(error, context, options.signal);
 			}
+		}
+
+		if (!names?.length) return;
+
+		// Live queries of the named operations refetch, whatever their key.
+		for (const watchers of this.#shared.watchers.values()) {
+			for (const watcher of [...watchers]) if (watcher.name && names.includes(watcher.name)) watcher.invalidate();
 		}
 	}
 
@@ -1078,11 +1099,27 @@ export class Client {
 
 				try {
 					// Raced against the signal: a stalled middleware, header resolver or body must not outlive the timeout.
-					data = deepFreeze(
+					data = this.#transform(
 						await raceAbort(this.#send<TData>(query, options, context, scope.signal), scope.signal),
+						context,
 					);
 				} catch (error) {
 					if (scope.signal.aborted || !policy || attempt >= policy.attempts || !policy.retryIf(error, context)) {
+						// With `errorPolicy: "all"`, partial data next to GraphQL errors is cached: live queries show it
+						// alongside the error.
+						const partial =
+							options.errorPolicy === "all" && isClientError(error) && error.errors.length > 0
+								? error.data
+								: undefined;
+
+						try {
+							if (partial != null && writesCache && this.#supersede(cacheKey, order)) {
+								await this.#store(cacheKey, this.#transform(partial, context), order);
+							}
+						} catch (storeError) {
+							this.#report(storeError, context, options.signal);
+						}
+
 						this.#report(error, context, options.signal);
 						throw error;
 					}
@@ -1192,7 +1229,7 @@ export class Client {
 		const headers = await this.#createHeaders(context, options.headers);
 		const response = await this.#run(this.#createRequest(payload, method, headers, signal), context);
 
-		return this.#parseResponse<TData>(response, signal);
+		return this.#parseResponse<TData>(response, signal, options.errorPolicy);
 	}
 
 	/**
@@ -1368,10 +1405,11 @@ export class Client {
 	 * @template TData - The shape of the `data` field in the response
 	 * @param response - The fetch Response
 	 * @param signal - The request signal, used to tell aborts apart from malformed bodies
+	 * @param errorPolicy - With `ignore`, GraphQL errors next to data are dropped
 	 * @returns The `data` field
 	 * @throws {ClientError} When the response cannot be used
 	 */
-	async #parseResponse<TData>(response: Response, signal: AbortSignal): Promise<TData> {
+	async #parseResponse<TData>(response: Response, signal: AbortSignal, errorPolicy?: ErrorPolicy): Promise<TData> {
 		let body: (GraphQLResponse<TData> & { incomplete?: boolean }) | undefined;
 
 		// A body already read (by middleware) fails the same way on every attempt: never a network failure.
@@ -1396,7 +1434,9 @@ export class Client {
 		const errors = normalizeErrors(body?.errors);
 		const data = body?.data ?? undefined;
 
-		if (errors.length) throw createGraphQLError(response, errors, data);
+		if (errors.length && !(errorPolicy === "ignore" && data !== undefined)) {
+			throw createGraphQLError(response, errors, data);
+		}
 
 		if (!response.ok) throw responseError(describeStatus(response), response, { data });
 		if (data === undefined) throw responseError("No data found in the GraphQL response.", response);
@@ -1468,6 +1508,20 @@ export class Client {
 			errors: state.errors.length ? state.errors : undefined,
 			incomplete: state.hasNext,
 		};
+	}
+
+	/**
+	 * Runs a network result through the plugins' `result` hooks, then freezes it.
+	 *
+	 * @template T - The data type
+	 * @param data - The result's data
+	 * @param context - The operation metadata
+	 * @returns The (transformed) frozen data
+	 */
+	#transform<T>(data: T, context: OperationContext): T {
+		for (const plugin of this.#plugins) if (plugin.result) data = plugin.result(data, context) as T;
+
+		return deepFreeze(data);
 	}
 
 	/**
@@ -2355,4 +2409,28 @@ function returnFalse(): false {
  */
 function createStreamState(): StreamState {
 	return { data: undefined, errors: [], hasNext: false, pending: new Map() };
+}
+
+/**
+ * Fills the options a call left undefined from defaults, earlier defaults first. The options object is copied only
+ * when a default applies.
+ *
+ * @template T - The options type
+ * @param options - The call's options
+ * @param defaults - Defaults, by precedence
+ * @returns The options with defaults
+ */
+function withDefaults<T extends object>(options: T, ...defaults: Array<object | undefined>): T {
+	let merged = options;
+
+	for (const source of defaults) {
+		for (const [key, value] of Object.entries(source ?? {})) {
+			if ((merged as Record<string, unknown>)[key] !== undefined) continue;
+
+			if (merged === options) merged = { ...options };
+			(merged as Record<string, unknown>)[key] = value;
+		}
+	}
+
+	return merged;
 }

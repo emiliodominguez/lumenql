@@ -22,6 +22,8 @@ export interface QueryWatcher<TData> {
 	current(): TData | undefined;
 	/** Replaces the shown data, even with `undefined` (e.g. when an optimistic layer it showed was removed) */
 	replace(data: TData | undefined): void;
+	/** The watched operation's name, for `refetchQueries` */
+	name?: string | undefined;
 }
 
 /**

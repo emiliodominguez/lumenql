@@ -175,6 +175,8 @@ export interface ClientConfiguration {
 	 * delivery, SSE) are plugins too; `lumenql/core` ships none of them.
 	 */
 	plugins?: ReadonlyArray<Plugin> | undefined;
+	/** Defaults per operation type (fetch and error policies, polling...), under each call's own options. */
+	defaultOptions?: DefaultOptions | undefined;
 }
 
 /**
@@ -263,6 +265,15 @@ export interface Plugin {
 	 * @returns The payloads, or `undefined` when this plugin does not handle the response
 	 */
 	decode?(response: Response, signal: AbortSignal): AsyncIterable<string> | undefined;
+	/**
+	 * Transforms a network result before it is cached and returned (e.g. parsing dates). Runs on real data only;
+	 * results are cached as returned, so with a persistent cache (`StorageCache`) keep them JSON-serializable.
+	 *
+	 * @param data - The result's data
+	 * @param context - The operation metadata
+	 * @returns The data to use
+	 */
+	result?(data: unknown, context: OperationContext): unknown;
 	/**
 	 * Merges a payload into a streamed result (e.g. `@defer` / `@stream`). Without a plugin handling it, a payload's
 	 * `data` replaces the result.
@@ -404,6 +415,28 @@ export interface PersistedQueriesOptions {
 }
 
 /**
+ * What GraphQL errors in a response with data mean. See {@link RequestOptions.errorPolicy}.
+ */
+export type ErrorPolicy = "none" | "all" | "ignore";
+
+/**
+ * Per-operation-type defaults, applied under each call's own options.
+ */
+export interface DefaultOptions {
+	/** Defaults for queries (`gql` and live queries) */
+	query?: Pick<RequestOptions<unknown, unknown>, "fetchPolicy" | "errorPolicy"> | undefined;
+	/** Defaults for mutations */
+	mutation?: Pick<RequestOptions<unknown, unknown>, "fetchPolicy" | "errorPolicy"> | undefined;
+	/** Defaults for live queries (`watch` and the hooks), on top of `query` */
+	watch?:
+		| Pick<
+				WatchOptions<unknown, unknown>,
+				"fetchPolicy" | "errorPolicy" | "pollInterval" | "refetchOnFocus" | "refetchOnReconnect"
+		  >
+		| undefined;
+}
+
+/**
  * Options for a single {@link Client.gql} call.
  *
  * @template TData - The shape of the `data` field in the response
@@ -438,6 +471,16 @@ export interface RequestOptions<TData, TVariables> {
 	retry?: number | RetryOptions | false | undefined;
 	/** Cache key prefixes to invalidate once the operation succeeds (typically after a mutation). */
 	invalidates?: ReadonlyArray<CacheKey> | undefined;
+	/** Live queries to refetch, by operation name, once the operation succeeds (typically after a mutation). */
+	refetchQueries?: ReadonlyArray<string> | undefined;
+	/**
+	 * What GraphQL errors in a response with data mean. Defaults to `none`.
+	 * - `none`: the operation fails; nothing is cached
+	 * - `ignore`: the errors are dropped, the (partial) data is returned and cached
+	 * - `all`: the operation fails with the errors, but the partial data is cached and live queries show it alongside
+	 *   the error (`ClientError.data` carries it too)
+	 */
+	errorPolicy?: ErrorPolicy | undefined;
 	/**
 	 * Cache entries to update immediately, before the server answers. Every update is rolled back if the operation
 	 * fails. Build entries with {@link optimistic} for full typing; pair with `invalidates` to reconcile.
@@ -501,7 +544,7 @@ export interface QueryState<TData> {
  */
 export interface WatchOptions<TData, TVariables> extends Omit<
 	RequestOptions<TData, TVariables>,
-	"invalidates" | "optimistic"
+	"invalidates" | "optimistic" | "refetchQueries"
 > {
 	/** Refetch every N milliseconds while observed */
 	pollInterval?: number | undefined;

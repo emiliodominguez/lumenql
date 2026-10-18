@@ -6,6 +6,10 @@
 
 - Plugins (`plugins` option): `send` (payload-level middleware), `headers`, `encode`, `bypass`, `decode` and `merge` hooks, plus `setup` / `client.dispose()`. Uploads, persisted queries, SSE, incremental delivery and `debug` logging are now plugins (`upload()`, `persistedQueries()`, `sse()`, `incremental()`, `logger()`); the `lumenql` entry installs them from the same options as before, so nothing changes for existing code.
 - `lumenql/core`: the bare client without built-in plugins (8.9 kB min+gzip for `Client` + `MemoryCache`, against 10.5 kB in 2.0.0), plus `lumenql/upload`, `lumenql/persisted`, `lumenql/incremental` and `lumenql/sse` to add only what an app uses.
+- `errorPolicy` (`none` | `ignore` | `all`) per call: keep partial data next to GraphQL errors (`ignore` returns and caches it; `all` still fails, but caches it so live queries show it alongside the error).
+- `defaultOptions` per operation type (`query`, `mutation`, `watch`): fetch and error policies, polling and refetch triggers, under each call's own options.
+- `refetchQueries`: live queries to refetch by operation name after an operation succeeds, next to `invalidates`.
+- `scalars({ field: parser })` plugin (`lumenql/scalars`) and the `result` plugin hook: transform network results before they are cached and returned (e.g. dates).
 - `client.on(type, listener)`: an event bus for devtools, logging and telemetry (`operation`, `result` with its source, `error`, `done`, `retry`, `cache`, `invalidate`, `optimistic`, `watch`). Nothing is built while nobody listens. `OperationContext` gains `id` and `stream`.
 
 ### Changed

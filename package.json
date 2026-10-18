@@ -139,6 +139,16 @@
 				"default": "./dist/sse.cjs"
 			}
 		},
+		"./scalars": {
+			"import": {
+				"types": "./dist/scalars.d.ts",
+				"default": "./dist/scalars.js"
+			},
+			"require": {
+				"types": "./dist/scalars.d.cts",
+				"default": "./dist/scalars.cjs"
+			}
+		},
 		"./package.json": "./package.json"
 	},
 	"typesVersions": {
@@ -163,6 +173,9 @@
 			],
 			"sse": [
 				"./dist/sse.d.ts"
+			],
+			"scalars": [
+				"./dist/scalars.d.ts"
 			]
 		}
 	},

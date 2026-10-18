@@ -9,6 +9,7 @@ export { QueryRef, type QueryListener } from "./query-ref";
 export { incremental } from "./incremental";
 export { persistedQueries } from "./persisted";
 export { isRetryable } from "./retry";
+export { scalars, type ScalarParser } from "./scalars";
 export { sse } from "./sse";
 export { upload } from "./upload";
 export type {
@@ -16,6 +17,8 @@ export type {
 	Cache,
 	CacheKey,
 	CacheTarget,
+	DefaultOptions,
+	ErrorPolicy,
 	ClientConfiguration,
 	ClientEventListener,
 	ClientEvents,

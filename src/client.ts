@@ -56,9 +56,25 @@ function withBuiltIns(configuration: ClientConfiguration): Plugin[] {
  */
 export class Client extends CoreClient {
 	/**
+	 * The configuration as given, without the built-in plugins (rebuilt from it by `extend()`).
+	 */
+	readonly #own: ClientConfiguration;
+
+	/**
 	 * @param configuration - Configuration for the client
 	 */
 	constructor(configuration: ClientConfiguration) {
 		super({ ...configuration, plugins: withBuiltIns(configuration) });
+		this.#own = configuration;
+	}
+
+	/**
+	 * Returns a derived client with the built-in plugins of this entry, configured by the merged options.
+	 *
+	 * @param overrides - Configuration overrides
+	 * @returns The derived client
+	 */
+	override extend(overrides: Partial<ClientConfiguration>): Client {
+		return new Client({ ...this.#own, ...overrides });
 	}
 }

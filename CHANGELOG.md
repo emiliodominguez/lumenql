@@ -4,8 +4,9 @@
 
 ### Added
 
+- Fourth adversarial round on the new code, all fixed before release: `entities()` could loop forever between entries holding conflicting values, override responses in flight and resurrect invalidated entries (it now goes through `updateEntry`, shares its index across `extend()`ed clients, stays bounded and propagates parsed scalars); deduplicated calls with different `errorPolicy` values no longer share an outcome; every `operation` event ends with `result`/`error`/`done` (single-result streams, broken-out loops, failing cache reads, `cache-and-network` refreshes); `extend()` works with subclasses again; `persistedQueries()` keeps other plugins' extensions; `sse()` keeps a multipart `Accept` added before it; only plain data is frozen (parsed class instances keep their mutability); `errorPolicy: "all"` errors carry the transformed data.
 - Plugins (`plugins` option): `send` (payload-level middleware), `headers`, `encode`, `bypass`, `decode` and `merge` hooks, plus `setup` / `client.dispose()`. Uploads, persisted queries, SSE, incremental delivery and `debug` logging are now plugins (`upload()`, `persistedQueries()`, `sse()`, `incremental()`, `logger()`); the `lumenql` entry installs them from the same options as before, so nothing changes for existing code.
-- `lumenql/core`: the bare client without built-in plugins (8.9 kB min+gzip for `Client` + `MemoryCache`, against 10.5 kB in 2.0.0), plus `lumenql/upload`, `lumenql/persisted`, `lumenql/incremental` and `lumenql/sse` to add only what an app uses.
+- `lumenql/core`: the bare client without built-in plugins (9.4 kB min+gzip for `Client` + `MemoryCache`, against 10.5 kB in 2.0.0), plus `lumenql/upload`, `lumenql/persisted`, `lumenql/incremental` and `lumenql/sse` to add only what an app uses.
 - `errorPolicy` (`none` | `ignore` | `all`) per call: keep partial data next to GraphQL errors (`ignore` returns and caches it; `all` still fails, but caches it so live queries show it alongside the error).
 - `defaultOptions` per operation type (`query`, `mutation`, `watch`): fetch and error policies, polling and refetch triggers, under each call's own options.
 - `refetchQueries`: live queries to refetch by operation name after an operation succeeds, next to `invalidates`.
@@ -13,12 +14,13 @@
 - `entities()` plugin (`lumenql/entities`, normalized-cache-lite): an entity (`__typename` + `id`, or a custom identity) returned by a mutation or written to the cache updates its scalar fields in every other cached result holding it, and the live queries showing them, without a schema or a document parser.
 - Svelte, Vue and Solid bindings: `lumenql/svelte` (`query`, `mutation`, `subscription` stores; no dependency), `lumenql/vue` (`lumenql(client)` plugin, `useQuery`, `useMutation`, `useSubscription` with ref or getter options) and `lumenql/solid` (`ClientContext`, `createQuery`, `createMutation`, `createSubscription`).
 - Devtools (`lumenql/devtools`, ~6 kB, dev-only): `devtools()` is one line. A launcher (or Ctrl+Shift+L) opens an operations list showing where each result came from and how long it took; click an operation to see its result, error and variables, run it again or copy them. Also the cache (live queries marked, one-click invalidation), an event log, a filter, and remembered state. Shadow DOM, light and dark, a no-op in production builds unless forced. A playground lives in `examples/devtools-playground`.
+- `client.updateEntry(key, update)`: updates a cached entry from its newest real data by serialized key, in the entry's turn, without superseding requests in flight or recreating invalidated entries. The building block of `entities()`.
 - `client.on(type, listener)`: an event bus for devtools, logging and telemetry (`operation`, `result` with its source, `error`, `done`, `retry`, `cache`, `invalidate`, `optimistic`, `watch`). Nothing is built while nobody listens. `OperationContext` gains `id` and `stream`.
 
 ### Changed
 
 - `debug: true` logs a deduplicated call when its shared result arrives (it was logged when it joined the request).
-- The size budget of the `lumenql` entry is 11.75 kB (the plugin seams and the event bus cost about 0.9 kB); `lumenql/core` has its own 9.25 kB budget.
+- The size budget of the `lumenql` entry is 12.25 kB (the plugin seams and the event bus cost about 0.9 kB); `lumenql/core` has its own 9.5 kB budget.
 
 ## 2.0.0 - 2026-10-15
 

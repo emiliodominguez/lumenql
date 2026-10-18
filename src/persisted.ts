@@ -100,7 +100,8 @@ export function persistedQueries(options: boolean | PersistedQueriesOptions = tr
 					query,
 					variables,
 					operationName,
-					extensions: miss === "unsupported" ? undefined : extensions,
+					// Extensions of other plugins are kept; only the persisted query is dropped.
+					extensions: miss === "unsupported" ? payload.extensions : extensions,
 				});
 			}
 		},

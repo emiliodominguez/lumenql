@@ -263,9 +263,9 @@ export function deepFreeze<T>(value: T): T {
 	while (pending.length > 0) {
 		const current = pending.pop();
 
-		if (!isObject(current) || frozen.has(current) || ArrayBuffer.isView(current)) {
-			continue;
-		}
+		// Only plain data (arrays and plain objects) is frozen: class instances (dates, money, a parser's output) keep
+		// their own mutability, e.g. lazily cached fields.
+		if (!isObject(current) || frozen.has(current) || !isPlainData(current)) continue;
 
 		Object.freeze(current);
 		frozen.add(current);
@@ -274,6 +274,20 @@ export function deepFreeze<T>(value: T): T {
 	}
 
 	return value;
+}
+
+/**
+ * Whether a value is plain data: an array or an object whose prototype is `Object.prototype` or `null`.
+ *
+ * @param value - An object
+ * @returns `true` for plain data
+ */
+export function isPlainData(value: object): boolean {
+	if (Array.isArray(value)) return true;
+
+	const prototype = Object.getPrototypeOf(value);
+
+	return prototype === Object.prototype || prototype === null;
 }
 
 /**

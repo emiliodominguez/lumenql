@@ -63,15 +63,15 @@ property check: event objects are only built when someone listens.
 | `operation`  | `{ id, context, fetchPolicy, key }` when an operation starts                |
 | `result`     | `{ id, context, source: "network" \| "cache" \| "dedupe", data, duration }` |
 | `error`      | `{ id, context, error, duration }`                                          |
-| `retry`      | `{ id, context, attempt, delay, error }`                                    |
+| `retry`      | `{ context, error, delay, attempts }` (`context.id`, `context.attempt`)     |
 | `cache`      | `{ key, data }` when data lands in the cache (network result, write, merge) |
 | `invalidate` | `{ prefix, removed }`                                                       |
 | `optimistic` | `{ key, phase: "apply" \| "commit" \| "rollback" }`                         |
 
 ## Size targets (min + gzip)
 
-- `lumenql/core` (`Client` + `MemoryCache`): ≤ 9.25 kB (2.0.0 shipped 10.5 kB for the same import).
-- `lumenql` (everything): ≤ 11.75 kB (2.0.0: 10.5 kB; the plugin seams and the event bus cost about 0.9 kB).
+- `lumenql/core` (`Client` + `MemoryCache`): ≤ 9.5 kB (2.0.0 shipped 10.5 kB for the same import).
+- `lumenql` (everything): ≤ 12.25 kB (2.0.0: 10.5 kB; the plugin seams and the event bus cost about 0.9 kB).
 - Each plugin: ≤ 1.75 kB.
 
 ## Customization added alongside

@@ -388,7 +388,15 @@ export class Client {
 		if (this.#observed("operation")) this.#emit("operation", { id, context, fetchPolicy, key: cacheKey });
 
 		if (cache && readsCache(fetchPolicy)) {
-			const cached = this.#queued<TData>(cacheKey) ?? (await this.#read<TData>(cacheKey));
+			let cached: TData | undefined;
+
+			try {
+				cached = this.#queued<TData>(cacheKey) ?? (await this.#read<TData>(cacheKey));
+			} catch (error) {
+				// Every started operation ends with a `result` or an `error` event.
+				if (this.#observed("error")) this.#emit("error", { id, context, error });
+				throw error;
+			}
 
 			if (cached !== undefined) {
 				// Stale-while-revalidate: answer now, refresh the entry (and every live query) in the background.
@@ -405,9 +413,18 @@ export class Client {
 						bypass,
 						id,
 						trace,
-					).then(function invalidateAfterRefresh(): Promise<void> {
-						return client.#applyInvalidates(options, context);
-					}, ignoreError);
+					).then(
+						function refreshed(fresh: TData): Promise<void> {
+							if (client.#observed("result")) {
+								client.#emit("result", { id, context, source: "network", data: fresh });
+							}
+
+							return client.#applyInvalidates(options, context);
+						},
+						function refreshFailed(error: unknown): void {
+							if (client.#observed("error")) client.#emit("error", { id, context, error });
+						},
+					);
 				}
 
 				// Adapters may hand out fresh objects (e.g. StorageCache parses JSON): results are always frozen.
@@ -528,7 +545,9 @@ export class Client {
 			options.retry === undefined;
 		const writesCache = fetchPolicy !== "no-cache";
 		// Requests that write the cache and requests that must not are never merged.
-		const flightKey = writesCache ? cacheKey : `no-cache:${cacheKey}`;
+		// Callers with different error policies get different outcomes from the same response: never merged either.
+		const policy = options.errorPolicy && options.errorPolicy !== "none" ? `${options.errorPolicy}:` : "";
+		const flightKey = `${writesCache ? "" : "no-cache:"}${policy}${cacheKey}`;
 		const flight = canDedupe ? this.#inFlight.get(flightKey) : undefined;
 		// Never join a request older than an invalidation (issued through another client sharing the cache, it cannot
 		// clear this client's map) or than data applied since (a write): its response will not be stored.
@@ -595,6 +614,8 @@ export class Client {
 		};
 		// Whether an incremental (`@defer` / `@stream`) result is still expecting payloads.
 		let incomplete = false;
+		// Whether the stream failed (an `error` event ends it instead of `done`).
+		let failed = false;
 
 		if (this.#observed("operation")) {
 			this.#emit("operation", {
@@ -685,24 +706,23 @@ export class Client {
 
 				throw incompleteError(response, state.data);
 			}
-
-			if (this.#observed("done")) this.#emit("done", { id, context });
 		} catch (error) {
 			// The caller stopping a stream ends it quietly (like breaking out of the loop), whatever the transport,
 			// unless an incremental result would be left partial.
-			if (scope.signal.aborted && !incomplete) {
-				if (this.#observed("done")) this.#emit("done", { id, context });
-				return;
-			}
+			if (scope.signal.aborted && !incomplete) return;
 
 			if (!scope.signal.aborted) this.#report(error, context, options.signal);
 
+			failed = true;
 			if (this.#observed("error")) this.#emit("error", { id, context, error });
 
 			throw error;
 		} finally {
 			scope.abort();
 			scope.dispose();
+
+			// However the stream ended (completed, single result, aborted, or the consumer broke out of the loop).
+			if (!failed && this.#observed("done")) this.#emit("done", { id, context });
 		}
 	}
 
@@ -909,6 +929,40 @@ export class Client {
 	}
 
 	/**
+	 * Updates a cached entry from its current real data, by its serialized key (as events report it): the building block
+	 * of plugins keeping entries consistent (e.g. `entities()`). Runs in the entry's turn, after the cache operations
+	 * queued before it, so it always sees the newest data. Unlike `write()`, it is not newer than requests in flight
+	 * (their responses still land) and it never recreates an entry: nothing happens when the entry is missing, expired
+	 * or being invalidated. Live queries showing the entry receive the result; optimistic layers stay on top.
+	 *
+	 * @param key - The serialized cache key
+	 * @param update - Returns the new data, or the same reference to leave the entry unchanged
+	 * @returns Whether the entry was updated
+	 */
+	updateEntry(key: string, update: (data: unknown) => unknown): Promise<boolean> {
+		const client = this;
+		const since = registry.sequence;
+
+		return this.#lane(key, async function updateInLane(): Promise<boolean> {
+			const entry = client.#shared.layers.get(key);
+
+			if (entry?.stale || client.#invalidatedSince(key, since)) return false;
+
+			const current = entry ? entry.base : await client.#read(key);
+
+			if (current === undefined) return false;
+
+			const next = update(current);
+
+			if (next === current) return false;
+
+			const { order } = client.#shared.lanes.get(key)!;
+
+			return client.#write(key, deepFreeze(next), since, order, entry?.order ?? order, true);
+		});
+	}
+
+	/**
 	 * Loads a snapshot produced by {@link Client.extract} into the cache.
 	 *
 	 * @param snapshot - The snapshot
@@ -937,7 +991,7 @@ export class Client {
 		}
 
 		for (const key of inFlight.keys()) {
-			if (matchesKeyPrefix(key.replace(/^no-cache:/, ""), prefix)) inFlight.delete(key);
+			if (matchesKeyPrefix(key.replace(/^(?:no-cache:)?(?:all:|ignore:)?/, ""), prefix)) inFlight.delete(key);
 		}
 
 		for (const [key, entry] of shared.layers) {
@@ -1031,11 +1085,8 @@ export class Client {
 	 * @param overrides - Configuration values to replace
 	 * @returns A new client
 	 */
-	extend(overrides: Partial<ClientConfiguration>): this {
-		// The same class: a client from `lumenql` derives one with its built-in plugins, a bare one stays bare.
-		const Derived = this.constructor as new (configuration: ClientConfiguration) => this;
-
-		return new Derived({ ...this.#configuration, ...overrides });
+	extend(overrides: Partial<ClientConfiguration>): Client {
+		return new Client({ ...this.#configuration, ...overrides });
 	}
 
 	/**
@@ -1113,8 +1164,15 @@ export class Client {
 								: undefined;
 
 						try {
-							if (partial != null && writesCache && this.#supersede(cacheKey, order)) {
-								await this.#store(cacheKey, this.#transform(partial, context), order);
+							if (partial != null) {
+								const transformed = this.#transform(partial, context);
+
+								// The error carries the same (transformed) data as the cache.
+								(error as { data: unknown }).data = transformed;
+
+								if (writesCache && this.#supersede(cacheKey, order)) {
+									await this.#store(cacheKey, transformed, order);
+								}
 							}
 						} catch (storeError) {
 							this.#report(storeError, context, options.signal);
@@ -1708,6 +1766,7 @@ export class Client {
 	 * @param order - The order of the response or write
 	 * @param freshness - When the data was requested (defaults to `order`): data requested after an operation
 	 *   started already contains its committed optimistic effect
+	 * @param derived - Whether the data was derived from the entry's own data (`updateEntry`)
 	 * @returns Whether the data was stored
 	 */
 	async #write(
@@ -1716,6 +1775,7 @@ export class Client {
 		epoch: number,
 		order: number,
 		freshness: number = order,
+		derived = false,
 	): Promise<boolean> {
 		const cache = this.#configuration.cache;
 		const entry = this.#shared.layers.get(cacheKey);
@@ -1746,7 +1806,7 @@ export class Client {
 			await this.#render(cacheKey, entry);
 			this.#landed(cacheKey, epoch);
 
-			if (this.#observed("cache")) this.#emit("cache", { key: cacheKey, data });
+			if (this.#observed("cache")) this.#emit("cache", { key: cacheKey, data, derived });
 
 			if (realOnly && entry.layers.length === 0 && this.#shared.layers.get(cacheKey) === entry) {
 				this.#shared.layers.delete(cacheKey);
@@ -1769,7 +1829,7 @@ export class Client {
 		this.#landed(cacheKey, epoch);
 		this.#notify(cacheKey, data);
 
-		if (this.#observed("cache")) this.#emit("cache", { key: cacheKey, data });
+		if (this.#observed("cache")) this.#emit("cache", { key: cacheKey, data, derived });
 
 		return true;
 	}

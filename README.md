@@ -32,7 +32,7 @@ Caching, live queries, retries, subscriptions and streaming, with optional React
 
 **Extensibility**
 
-- **Lean core, opt-in features.** `lumenql/core` is the bare client (~9 kB); uploads, persisted queries, `@defer`, SSE, scalars and entities are plugins you add one by one. The `lumenql` entry ships them all, configured by the options below.
+- **Lean core, opt-in features.** `lumenql/core` is the bare client (~9.4 kB); uploads, persisted queries, `@defer`, SSE, scalars and entities are plugins you add one by one. The `lumenql` entry ships them all, configured by the options below.
 - **Plugins.** One small interface with hooks for payloads, headers, bodies, streamed responses and results. Write your own in a few lines.
 - **Events.** `client.on()` exposes operations, results, retries, cache writes, invalidations, optimistic layers and live queries for logging and telemetry. It costs nothing while nobody listens.
 - **Devtools.** An in-page inspector (`lumenql/devtools`) with an operations timeline, the cache, live queries and the event log.
@@ -592,7 +592,7 @@ import { scalars } from "lumenql/scalars";
 const client = new Client({ url, plugins: [scalars({ createdAt: parseDate, total: Number })] });
 ```
 
-Results are cached as parsed. With `StorageCache`, return JSON-serializable values.
+Results are cached as parsed and frozen with the rest of the result (class instances such as dates keep their own mutability). With `StorageCache`, return JSON-serializable values. The same goes for SSR: `restore()` of an `extract()` snapshot brings back the JSON values, not the parsed ones.
 
 ### Entities
 
@@ -666,7 +666,7 @@ const tracing: Plugin = {
 | `error`      | An operation failed (after retries)                                           |
 | `done`       | A stream ended                                                                |
 | `retry`      | A failed attempt will be retried after `delay` ms                             |
-| `cache`      | Real data landed in the cache                                                 |
+| `cache`      | Real data landed in the cache (`derived` when computed by `updateEntry`)      |
 | `invalidate` | An invalidation finished, with the number of removed entries                  |
 | `optimistic` | Optimistic layers were applied to an entry, committed or rolled back          |
 | `watch`      | A live query started or stopped watching an entry                             |
@@ -729,6 +729,7 @@ Try it in `examples/devtools-playground` (`node examples/devtools-playground/bui
 | `subscribe(options)`                   | `AsyncGenerator` over SSE subscriptions or `@defer`/`@stream` results.                                                                                       |
 | `invalidate(prefix?)`                  | Removes cached results under a key prefix and refetches watchers. Returns the number removed.                                                                |
 | `read(target)` / `write(target, data)` | Reads or writes a cache entry; `write` notifies watchers.                                                                                                    |
+| `updateEntry(key, update)`             | Updates a cached entry from its newest data, by serialized key (for plugins). Never recreates or supersedes anything.                                        |
 | `extract()` / `restore(snapshot)`      | Serializes the cache or hydrates it (SSR).                                                                                                                   |
 | `on(type, listener)`                   | Listens to [client events](#events). Returns an unsubscribe function.                                                                                        |
 | `dispose()`                            | Runs plugin teardowns (e.g. removes the devtools).                                                                                                           |
@@ -764,8 +765,8 @@ Sizes are minified + gzip, measured by `yarn size` and enforced in CI:
 
 | Import                                               | Size       |
 | ---------------------------------------------------- | ---------- |
-| `Client` + `MemoryCache` from `lumenql` (everything) | ~11.7 kB   |
-| `Client` + `MemoryCache` from `lumenql/core`         | ~9.1 kB    |
+| `Client` + `MemoryCache` from `lumenql` (everything) | ~12 kB     |
+| `Client` + `MemoryCache` from `lumenql/core`         | ~9.4 kB    |
 | Each plugin                                          | 0.3–1.7 kB |
 | `lumenql/react`                                      | ~1.8 kB    |
 | `lumenql/svelte` / `vue` / `solid`                   | 0.5–0.8 kB |

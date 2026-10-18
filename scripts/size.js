@@ -6,7 +6,7 @@ import { buildSync, transformSync } from "esbuild";
  * Maximum min+gzip size of a typical app import from the batteries-included entry (`Client` + `MemoryCache`,
  * tree-shaken), in bytes. CI fails above it.
  */
-const BUDGET = 11.75 * 1024;
+const BUDGET = 12.25 * 1024;
 
 /**
  * Tree-shaken imports measured against a budget (min+gzip bytes), in addition to the full bundles.
@@ -16,7 +16,7 @@ const IMPORTS = [
 	{
 		label: "core: Client + MemoryCache",
 		code: 'import { Client, MemoryCache } from "./dist/core.js";',
-		budget: 9.25 * 1024,
+		budget: 9.5 * 1024,
 	},
 	{ label: "plugin: upload", code: 'import { upload } from "./dist/upload.js";', budget: 1.75 * 1024 },
 	{

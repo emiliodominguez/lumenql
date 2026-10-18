@@ -177,7 +177,16 @@ export function sse(): Plugin {
 	return {
 		name: "sse",
 		headers(headers: Headers, context: OperationContext): void {
-			if (context.stream) headers.set("Accept", "text/event-stream");
+			if (!context.stream) return;
+
+			// A multipart type advertised by a plugin that ran earlier (`incremental()`) stays acceptable.
+			const multipart = (headers.get("Accept") ?? "").split(/,\s*/).filter(function isMultipart(
+				type: string,
+			): boolean {
+				return type.startsWith("multipart/");
+			});
+
+			headers.set("Accept", ["text/event-stream", ...multipart].join(", "));
 		},
 		decode(response: Response, signal: AbortSignal): AsyncIterable<string> | undefined {
 			// Media types are case-insensitive.

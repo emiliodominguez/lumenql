@@ -300,8 +300,11 @@ export interface ClientEvents {
 	done: { id: number; context: OperationContext };
 	/** A failed attempt is retried after `delay` milliseconds */
 	retry: { context: OperationContext; error: unknown; delay: number; attempts: number };
-	/** Real data landed in the cache (response, write, restore, merged page) */
-	cache: { key: string; data: unknown };
+	/**
+	 * Real data landed in the cache (response, write, restore, merged page). `derived` is set for data computed from
+	 * the entry's own data by `updateEntry` (plugins reacting to cache writes skip those to avoid feedback loops).
+	 */
+	cache: { key: string; data: unknown; derived: boolean };
 	/** An invalidation finished */
 	invalidate: { prefix: CacheKey; removed: number };
 	/** Optimistic layers were applied to an entry, or settled */

@@ -105,38 +105,59 @@ export function createQuery<TData = unknown, TVariables extends object = Record<
 	client?: Client,
 ): QueryAccessor<TData> {
 	const resolved = useClient(client);
-	const [state, setState] = createSignal<QueryState<TData>>(IDLE, { equals: false });
 	const identity = createMemo(function identify(): string {
 		const { skip, query, ...rest } = options();
 
 		return skip ? "" : stableStringify([String(query), rest]);
 	});
-	let ref: QueryRef<TData, TVariables> | undefined;
+	// The live query of the current identity, created without activating it (on the server, effects never run).
+	const ref = createMemo(function current(): QueryRef<TData, TVariables> | undefined {
+		if (!identity()) return undefined;
+
+		const { skip: _skip, ...watchOptions } = untrack(options);
+
+		return untrack(function create(): QueryRef<TData, TVariables> {
+			return resolved.watch<TData, TVariables>(
+				watchOptions as WithVariables<WatchOptions<TData, TVariables>, TVariables>,
+			);
+		});
+	});
+	// The latest state pushed by the subscribed live query, with the query it came from.
+	const [pushed, setPushed] = createSignal<{ ref: QueryRef<TData, TVariables>; state: QueryState<TData> } | undefined>();
 
 	createEffect(function follow(): void {
-		ref = undefined;
+		const current = ref();
 
-		if (!identity()) {
-			setState(IDLE);
-			return;
-		}
+		if (!current) return;
 
-		// Only the identity is tracked: a new options object with the same query never resubscribes.
-		const { skip: _skip, ...watchOptions } = untrack(options);
-		const current = resolved.watch<TData, TVariables>(
-			watchOptions as WithVariables<WatchOptions<TData, TVariables>, TVariables>,
+		onCleanup(
+			current.subscribe(function push(state: QueryState<TData>): void {
+				setPushed({ ref: current, state });
+			}),
 		);
-
-		ref = current;
-		onCleanup(current.subscribe(setState));
 	});
+
+	/**
+	 * The query's state: what its live query pushed, or (before it is subscribed, e.g. while rendering on the
+	 * server) what the live query holds right now (cached data, or loading).
+	 *
+	 * @returns The state
+	 */
+	function state(): QueryState<TData> {
+		const current = ref();
+		const latest = pushed();
+
+		if (!current) return IDLE;
+
+		return latest?.ref === current ? latest.state : current.getState();
+	}
 
 	return Object.assign(state, {
 		refetch(): Promise<QueryState<TData>> {
-			return ref ? ref.refetch() : Promise.resolve(IDLE);
+			return ref()?.refetch() ?? Promise.resolve(IDLE);
 		},
 		fetchMore(fetchOptions: FetchMoreOptions<TData, unknown>): Promise<QueryState<TData>> {
-			return ref ? ref.fetchMore(fetchOptions as FetchMoreOptions<TData, TVariables>) : Promise.resolve(IDLE);
+			return ref()?.fetchMore(fetchOptions as FetchMoreOptions<TData, TVariables>) ?? Promise.resolve(IDLE);
 		},
 	});
 }

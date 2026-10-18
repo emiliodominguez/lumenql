@@ -31,6 +31,13 @@ export interface DevtoolsHandle {
 	close(): void;
 	/** Removes the panel and stops listening */
 	dispose(): void;
+	/**
+	 * Also shows another client's operations in this panel (e.g. one derived with `extend()`).
+	 *
+	 * @param client - The client
+	 * @returns Stops showing it
+	 */
+	attach(client: Client): () => void;
 }
 
 /**
@@ -38,6 +45,7 @@ export interface DevtoolsHandle {
  */
 interface OperationRecord {
 	id: number;
+	client: Client;
 	type: string;
 	name: string;
 	query: string;
@@ -421,11 +429,23 @@ function remember(state: { open: boolean; tab: Tab }): void {
  * @returns Controls for the panel
  */
 export function mountDevtools(client: Client, options: DevtoolsOptions = {}): DevtoolsHandle {
-	if (typeof document === "undefined") return { open: noop, close: noop, dispose: noop };
+	if (typeof document === "undefined") {
+		return {
+			open: noop,
+			close: noop,
+			dispose: noop,
+			attach(): () => void {
+				return noop;
+			},
+		};
+	}
 
 	const limit = options.limit ?? 300;
 	const remembered = recall();
-	const operations = new Map<number, OperationRecord>();
+	// Operations by `<client>:<id>`: ids are per client.
+	const operations = new Map<string, OperationRecord>();
+	const clients = new Map<Client, number>();
+	const detachers = new Set<() => void>();
 	const entries = new Map<string, CacheRecord>();
 	const watchers = new Map<string, number>();
 	const log: LogRecord[] = [];
@@ -433,10 +453,11 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 	const shortcut = shortcutLabel === undefined ? undefined : matcher(shortcutLabel);
 	let isOpen = options.open ?? remembered.open === true;
 	let tab: Tab = remembered.tab === "cache" || remembered.tab === "log" ? remembered.tab : "operations";
-	let selected: string | number | undefined;
+	let selected: string | undefined;
 	let failures = 0;
 	let frame: number | undefined;
 	let shown = "";
+	let disposed = false;
 
 	const host = h("div", {
 		"data-lumenql-devtools": "",
@@ -476,20 +497,32 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 		else open();
 	});
 	filter.addEventListener("input", update);
-	root.append(h("style", {}, STYLES), panel, launcher);
+	// A constructed style sheet works under a strict CSP (no inline styles); older browsers get a <style> element.
+	if ("adoptedStyleSheets" in root && typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype) {
+		const sheet = new CSSStyleSheet();
+
+		sheet.replaceSync(STYLES);
+		root.adoptedStyleSheets = [sheet];
+	} else {
+		root.append(h("style", {}, STYLES));
+	}
+
+	root.append(panel, launcher);
 	(options.container ?? document.body).append(host);
 
 	/**
 	 * Schedules a render on the next frame: events arrive in bursts.
 	 */
 	function update(): void {
-		if (frame === undefined) frame = requestAnimationFrame(render);
+		if (frame === undefined && !disposed) frame = requestAnimationFrame(render);
 	}
 
 	/**
 	 * Opens the panel.
 	 */
 	function open(): void {
+		if (disposed) return;
+
 		isOpen = true;
 		failures = 0;
 		loadCache();
@@ -501,6 +534,8 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 	 * Closes the panel.
 	 */
 	function close(): void {
+		if (disposed) return;
+
 		isOpen = false;
 		remember({ open: false, tab });
 		update();
@@ -521,11 +556,11 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 	/**
 	 * Updates a tracked operation.
 	 *
-	 * @param id - The operation id
+	 * @param id - The operation's `<client>:<id>`
 	 * @param change - Applies the change
 	 */
-	function touch(id: number | undefined, change: (record: OperationRecord) => void): void {
-		const record = id === undefined ? undefined : operations.get(id);
+	function touch(id: string, change: (record: OperationRecord) => void): void {
+		const record = operations.get(id);
 
 		if (!record) return;
 
@@ -543,10 +578,15 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 	}
 
 	/**
-	 * Loads what is already cached (entries written before the panel mounted).
+	 * Syncs the cache list with what the cache holds: entries written before the panel mounted appear, entries the
+	 * cache evicted or expired disappear.
 	 */
 	function loadCache(): void {
 		client.extract().then(function fill(snapshot: Record<string, unknown>): void {
+			if (disposed) return;
+
+			for (const key of [...entries.keys()]) if (!Object.hasOwn(snapshot, key)) entries.delete(key);
+
 			for (const [key, data] of Object.entries(snapshot)) {
 				if (!entries.has(key)) entries.set(key, { key, data, updatedAt: Date.now(), version: 0 });
 			}
@@ -556,98 +596,136 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 		}, noop);
 	}
 
-	const stops = [
-		client.on("operation", function started({ id, context, fetchPolicy, key }): void {
-			operations.set(id, {
-				id,
-				type: context.type,
-				name: context.name ?? "anonymous",
-				query: context.query,
-				stream: context.stream === true,
-				fetchPolicy,
-				key,
-				variables: context.variables,
-				startedAt: Date.now(),
-				endedAt: undefined,
-				status: "pending",
-				source: context.stream ? "stream" : "network",
-				data: undefined,
-				error: undefined,
-				retries: 0,
-				version: 0,
-			});
-			trim(operations);
-			write("operation", `${context.type} ${context.name ?? "anonymous"}`);
-		}),
-		client.on("result", function resulted({ id, source, data }): void {
-			touch(id, function settle(record: OperationRecord): void {
-				record.data = data;
-				record.source = source;
+	/**
+	 * Shows a client's events in the panel.
+	 *
+	 * @param source - The client
+	 * @returns Stops showing it
+	 */
+	function attach(source: Client): () => void {
+		const n = clients.get(source) ?? clients.size + 1;
 
-				if (source !== "stream") {
+		/**
+		 * The panel-wide id of one of this client's operations.
+		 *
+		 * @param id - The client's operation id
+		 * @returns `<client>:<id>`
+		 */
+		function op(id: number | undefined): string {
+			return `${n}:${id}`;
+		}
+
+		clients.set(source, n);
+
+		const stops = [
+			source.on("operation", function started({ id, context, fetchPolicy, key }): void {
+				operations.set(op(id), {
+					id,
+					client: source,
+					type: context.type,
+					name: context.name ?? "anonymous",
+					query: context.query,
+					stream: context.stream === true,
+					fetchPolicy,
+					key,
+					variables: context.variables,
+					startedAt: Date.now(),
+					endedAt: undefined,
+					status: "pending",
+					source: context.stream ? "stream" : "network",
+					data: undefined,
+					error: undefined,
+					retries: 0,
+					version: 0,
+				});
+				trim(operations);
+				write("operation", `${context.type} ${context.name ?? "anonymous"}`);
+			}),
+			source.on("result", function resulted({ id, source, data }): void {
+				touch(op(id), function settle(record: OperationRecord): void {
+					record.data = data;
+					record.source = source;
+
+					if (source !== "stream") {
+						record.status = "ok";
+						record.endedAt = Date.now();
+					}
+				});
+				write("result", `#${id} ${SOURCES[source] ?? source}`);
+			}),
+			source.on("error", function failed({ id, error }): void {
+				touch(op(id), function fail(record: OperationRecord): void {
+					record.status = "error";
+					record.error = error;
+					record.endedAt = Date.now();
+				});
+				if (!isOpen) failures++;
+				write("error", `#${id} ${message(error)}`);
+			}),
+			source.on("done", function ended({ id }): void {
+				touch(op(id), function finish(record: OperationRecord): void {
 					record.status = "ok";
 					record.endedAt = Date.now();
+				});
+				write("done", `#${id} stream ended`);
+			}),
+			source.on("retry", function retried({ context, delay, attempts }): void {
+				touch(op(context.id), function count(record: OperationRecord): void {
+					record.retries = context.attempt + 1;
+				});
+				write("retry", `#${context.id} attempt ${context.attempt + 2}/${attempts + 1} in ${duration(delay)}`);
+			}),
+			source.on("cache", function cached({ key, data }): void {
+				const version = (entries.get(key)?.version ?? 0) + 1;
+
+				// Re-inserted: the most recently written entries come first.
+				entries.delete(key);
+				entries.set(key, { key, data, updatedAt: Date.now(), version });
+				trim(entries);
+				write("cache", describeKey(key).label);
+			}),
+			source.on("invalidate", function invalidated({ prefix, removed }): void {
+				for (const key of [...entries.keys()]) {
+					const { prefix: entryPrefix } = describeKey(key);
+
+					if (
+						entryPrefix &&
+						prefix.every(function same(segment: unknown, index: number): boolean {
+							return entryPrefix[index] === segment;
+						})
+					) {
+						entries.delete(key);
+					}
 				}
-			});
-			write("result", `#${id} ${SOURCES[source] ?? source}`);
-		}),
-		client.on("error", function failed({ id, error }): void {
-			touch(id, function fail(record: OperationRecord): void {
-				record.status = "error";
-				record.error = error;
-				record.endedAt = Date.now();
-			});
-			if (!isOpen) failures++;
-			write("error", `#${id} ${message(error)}`);
-		}),
-		client.on("done", function ended({ id }): void {
-			touch(id, function finish(record: OperationRecord): void {
-				record.status = "ok";
-				record.endedAt = Date.now();
-			});
-			write("done", `#${id} stream ended`);
-		}),
-		client.on("retry", function retried({ context, delay, attempts }): void {
-			touch(context.id, function count(record: OperationRecord): void {
-				record.retries = context.attempt + 1;
-			});
-			write("retry", `#${context.id} attempt ${context.attempt + 2}/${attempts + 1} in ${duration(delay)}`);
-		}),
-		client.on("cache", function cached({ key, data }): void {
-			const version = (entries.get(key)?.version ?? 0) + 1;
 
-			// Re-inserted: the most recently written entries come first.
-			entries.delete(key);
-			entries.set(key, { key, data, updatedAt: Date.now(), version });
-			trim(entries);
-			write("cache", describeKey(key).label);
-		}),
-		client.on("invalidate", function invalidated({ prefix, removed }): void {
-			for (const key of [...entries.keys()]) {
-				const { prefix: entryPrefix } = describeKey(key);
+				write("invalidate", `${prefix.length ? prefix.map(String).join(" / ") : "everything"} · ${removed} removed`);
+			}),
+			source.on("optimistic", function layered({ key, phase }): void {
+				write("optimistic", `${describeKey(key).label} · ${phase}`);
+			}),
+			source.on("watch", function watched({ key, watchers: count }): void {
+				if (count > 0) watchers.set(key, count);
+				else watchers.delete(key);
 
-				if (
-					entryPrefix &&
-					prefix.every(function same(segment: unknown, index: number): boolean {
-						return entryPrefix[index] === segment;
-					})
-				) {
-					entries.delete(key);
-				}
-			}
+				write("watch", `${describeKey(key).label} · ${count} watching`);
+			}),
+		];
 
-			write("invalidate", `${prefix.length ? prefix.map(String).join(" / ") : "everything"} · ${removed} removed`);
-		}),
-		client.on("optimistic", function layered({ key, phase }): void {
-			write("optimistic", `${describeKey(key).label} · ${phase}`);
-		}),
-		client.on("watch", function watched({ key, watchers: count }): void {
-			if (count > 0) watchers.set(key, count);
-			else watchers.delete(key);
+		/**
+		 * Stops showing this client.
+		 */
+		function detach(): void {
+			for (const stop of stops) stop();
+			clients.delete(source);
+			detachers.delete(detach);
+		}
 
-			write("watch", `${describeKey(key).label} · ${count} watching`);
-		}),
-	];
+		detachers.add(detach);
+
+		return detach;
+	}
+
+	attach(client);
 
 	/**
 	 * Whether any of the texts contains the filter.
@@ -673,7 +751,7 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 	 * @param children - The row's content
 	 * @returns The row
 	 */
-	function row(id: string | number, ...children: Node[]): HTMLElement {
+	function row(id: string, ...children: Node[]): HTMLElement {
 		const element = h("button", { type: "button", class: "row", "aria-selected": String(selected === id) }, ...children);
 
 		element.addEventListener("click", function select(): void {
@@ -722,14 +800,14 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 		const now = Date.now();
 		const rows: Node[] = [];
 
-		for (const record of [...operations.values()].reverse()) {
+		for (const [id, record] of [...operations].reverse()) {
 			const where = describeKey(record.key).label;
 
 			if (!matches(record.name, record.type, where)) continue;
 
 			rows.push(
 				row(
-					record.id,
+					`op:${id}`,
 					h("span", { class: `dot ${record.status}` }),
 					h("span", { class: "what" }, h("b", {}, record.name), h("span", {}, `${record.type} · ${where}`)),
 					h(
@@ -766,8 +844,17 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 		if (record.type === "query" && !record.stream) {
 			actions.append(
 				button("Run again", "action", function rerun(): void {
-					client
-						.gql({ query: record.query, variables: record.variables as object, fetchPolicy: "network-only" })
+					const [key, , , operationName] = JSON.parse(record.key) as [CacheKey, string, unknown, string | null];
+
+					// The same entry (key, variables, operation), refreshed from the network.
+					record.client
+						.gql({
+							query: record.query,
+							variables: record.variables as object,
+							key,
+							operationName: operationName ?? undefined,
+							fetchPolicy: "network-only",
+						})
 						.catch(noop);
 				}),
 			);
@@ -805,7 +892,7 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 
 			rows.push(
 				row(
-					record.key,
+					`entry:${record.key}`,
 					h("span", { class: `dot ${live ? "live" : ""}` }),
 					h("span", { class: "what" }, h("b", {}, label), h("span", {}, info || "no variables")),
 					h(
@@ -840,7 +927,8 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 		const actions = h("div", { class: "actions" });
 		const watching = live ? `${live} live ${live === 1 ? "query" : "queries"}` : "not watched";
 
-		if (prefix) {
+		// An entry without a key has no prefix of its own: invalidating `[]` would drop every result.
+		if (prefix?.length) {
 			actions.append(
 				button("Invalidate", "action", function invalidate(): void {
 					client.invalidate(prefix).catch(noop);
@@ -930,8 +1018,8 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 			}),
 		);
 
-		const record = tab === "operations" && typeof selected === "number" ? operations.get(selected) : undefined;
-		const entry = tab === "cache" && typeof selected === "string" ? entries.get(selected) : undefined;
+		const record = tab === "operations" && selected?.startsWith("op:") ? operations.get(selected.slice(3)) : undefined;
+		const entry = tab === "cache" && selected?.startsWith("entry:") ? entries.get(selected.slice(6)) : undefined;
 
 		list.classList.toggle("log", tab === "log");
 
@@ -944,7 +1032,7 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 
 		// The detail is rebuilt only when what it shows changed: selecting text or scrolling in it survives bursts.
 		const showing = record
-			? `operation:${record.id}:${record.version}`
+			? `${selected}:${record.version}`
 			: entry
 				? `entry:${entry.key}:${entry.version}:${watchers.get(entry.key) ?? 0}`
 				: "";
@@ -982,8 +1070,10 @@ export function mountDevtools(client: Client, options: DevtoolsOptions = {}): De
 	return {
 		open,
 		close,
+		attach,
 		dispose(): void {
-			for (const stop of stops) stop();
+			disposed = true;
+			for (const detach of [...detachers]) detach();
 			window.removeEventListener("keydown", onKey);
 			if (frame !== undefined) cancelAnimationFrame(frame);
 			frame = undefined;
@@ -1017,12 +1107,28 @@ function status(record: OperationRecord): string {
  * @returns The plugin
  */
 export function devtools(options: DevtoolsOptions = {}): Plugin {
+	// One panel per plugin instance: clients derived with `extend()` reuse the plugin, and join its panel.
+	let panel: DevtoolsHandle | undefined;
+	let users = 0;
+
 	return {
 		name: "devtools",
 		setup(client: Client): (() => void) | undefined {
 			if (isProduction() && !options.force) return undefined;
 
-			return mountDevtools(client, options).dispose;
+			const detach = panel ? panel.attach(client) : noop;
+
+			panel ??= mountDevtools(client, options);
+			users++;
+
+			return function teardown(): void {
+				detach();
+
+				if (--users === 0) {
+					panel?.dispose();
+					panel = undefined;
+				}
+			};
 		},
 	};
 }

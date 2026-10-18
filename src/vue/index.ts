@@ -164,6 +164,18 @@ export function useQuery<TData = unknown, TVariables extends object = Record<str
 			);
 
 			ref = current;
+
+			// On the server nothing ever unsubscribes (before Vue 3.5, cleanups of setup watchers are dropped there):
+			// render what the cache holds, without activating the query.
+			if (typeof window === "undefined") {
+				const state = current.getState();
+
+				data.value = state.data;
+				error.value = state.error;
+				loading.value = state.loading;
+				return;
+			}
+
 			onCleanup(
 				current.subscribe(function update(state: QueryState<TData>): void {
 					data.value = state.data;
@@ -280,12 +292,18 @@ export function useSubscription<TData = unknown, TVariables extends object = Rec
 			return stableStringify([String(query), rest]);
 		},
 		function open(_key: string, _previous: string | undefined, onCleanup: (cleanup: () => void) => void): void {
+			// Payloads of other variables never show as this stream's.
+			data.value = undefined;
+			error.value = undefined;
+
+			// Streams never open on the server: nothing would close them (see `useQuery`).
+			if (typeof window === "undefined") return;
+
 			const controller = new AbortController();
 
 			onCleanup(function close(): void {
 				controller.abort();
 			});
-			error.value = undefined;
 			active.value = true;
 
 			void (async function consume(): Promise<void> {

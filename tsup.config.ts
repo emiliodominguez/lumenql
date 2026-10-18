@@ -12,6 +12,9 @@ export default defineConfig({
 		entities: "src/entries/entities.ts",
 		devtools: "src/devtools/index.ts",
 		react: "src/react/index.ts",
+		svelte: "src/svelte/index.ts",
+		vue: "src/vue/index.ts",
+		solid: "src/solid/index.ts",
 		ws: "src/ws/index.ts",
 	},
 	format: ["esm", "cjs"],
@@ -20,5 +23,5 @@ export default defineConfig({
 	sourcemap: true,
 	clean: true,
 	treeshake: true,
-	external: ["react"],
+	external: ["react", "vue", "solid-js"],
 });

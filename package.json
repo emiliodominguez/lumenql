@@ -169,6 +169,36 @@
 				"default": "./dist/entities.cjs"
 			}
 		},
+		"./svelte": {
+			"import": {
+				"types": "./dist/svelte.d.ts",
+				"default": "./dist/svelte.js"
+			},
+			"require": {
+				"types": "./dist/svelte.d.cts",
+				"default": "./dist/svelte.cjs"
+			}
+		},
+		"./vue": {
+			"import": {
+				"types": "./dist/vue.d.ts",
+				"default": "./dist/vue.js"
+			},
+			"require": {
+				"types": "./dist/vue.d.cts",
+				"default": "./dist/vue.cjs"
+			}
+		},
+		"./solid": {
+			"import": {
+				"types": "./dist/solid.d.ts",
+				"default": "./dist/solid.js"
+			},
+			"require": {
+				"types": "./dist/solid.d.cts",
+				"default": "./dist/solid.cjs"
+			}
+		},
 		"./package.json": "./package.json"
 	},
 	"typesVersions": {
@@ -202,6 +232,15 @@
 			],
 			"entities": [
 				"./dist/entities.d.ts"
+			],
+			"svelte": [
+				"./dist/svelte.d.ts"
+			],
+			"vue": [
+				"./dist/vue.d.ts"
+			],
+			"solid": [
+				"./dist/solid.d.ts"
 			]
 		}
 	},
@@ -233,10 +272,18 @@
 		"bench": "esbuild bench/gql.bench.ts --bundle --platform=node --format=esm --log-level=warning --outfile=node_modules/.cache/bench.mjs && node node_modules/.cache/bench.mjs"
 	},
 	"peerDependencies": {
-		"react": ">=18"
+		"react": ">=18",
+		"vue": ">=3.3",
+		"solid-js": ">=1.8"
 	},
 	"peerDependenciesMeta": {
 		"react": {
+			"optional": true
+		},
+		"vue": {
+			"optional": true
+		},
+		"solid-js": {
 			"optional": true
 		}
 	},
@@ -254,10 +301,12 @@
 		"prettier": "^3.9.10",
 		"react": "^19",
 		"react-dom": "^19",
+		"solid-js": "1.9.3",
 		"tsup": "^8.5.1",
 		"typescript": "^5.9",
 		"vite": "^8.3.4",
 		"vitest": "^5.0.4",
+		"vue": "3.5.13",
 		"ws": "^8.22.0"
 	}
 }

@@ -36,7 +36,7 @@ const IMPORTS = [
  * exceeds its budget.
  */
 function main() {
-	for (const file of ["dist/react.js", "dist/ws.js"]) {
+	for (const file of ["dist/react.js", "dist/ws.js", "dist/svelte.js", "dist/vue.js", "dist/solid.js"]) {
 		report(file, transformSync(readFileSync(file, "utf8"), { minify: true, loader: "js" }).code);
 	}
 
@@ -51,7 +51,7 @@ function main() {
 			minify: true,
 			format: "esm",
 			write: false,
-			external: ["react"],
+			external: ["react", "vue", "solid-js"],
 			logLevel: "error",
 		});
 		const gzip = report(label, outputFiles[0].text);
